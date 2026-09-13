@@ -82,6 +82,12 @@ typedef NS_ENUM(NSInteger, PackagesSection) {
     self.navigationItem.searchController = self.searchCtl;
     self.navigationItem.hidesSearchBarWhenScrolling = NO;
 
+    // Re-queue tweaks applied in this session so they can be applied again
+    // without relaunching. Only shown while Cyanide stays open (after an
+    // in-session apply emptied the queue); on a fresh relaunch the queue already
+    // shows the tweaks, so the button is hidden. See updateReapplyButtonVisibility.
+    [self updateReapplyButtonVisibility];
+
     [[NSNotificationCenter defaultCenter] addObserver:self
                                              selector:@selector(catalogDidChange:)
                                                  name:PackageQueueDidChangeNotification
@@ -103,6 +109,7 @@ typedef NS_ENUM(NSInteger, PackagesSection) {
     [super viewWillAppear:animated];
     [self refreshCatalog];
     [self.tableView reloadData];
+    [self updateReapplyButtonVisibility];
 }
 
 - (void)catalogDidChange:(NSNotification *)note
@@ -110,6 +117,33 @@ typedef NS_ENUM(NSInteger, PackagesSection) {
     if (!self.isViewLoaded) return;
     [self refreshCatalog];
     [self.tableView reloadData];
+    [self updateReapplyButtonVisibility];
+}
+
+- (void)updateReapplyButtonVisibility
+{
+    if (!self.isViewLoaded) return;
+    if (settings_has_reappliable_tweaks()) {
+        if (!self.navigationItem.rightBarButtonItem) {
+            UIBarButtonItem *item =
+                [[UIBarButtonItem alloc] initWithImage:[UIImage systemImageNamed:@"arrow.clockwise"]
+                                                 style:UIBarButtonItemStylePlain
+                                                target:self
+                                                action:@selector(reapplyAppliedTweaks)];
+            item.accessibilityLabel = @"Re-apply tweaks";
+            self.navigationItem.rightBarButtonItem = item;
+        }
+    } else {
+        self.navigationItem.rightBarButtonItem = nil;
+    }
+}
+
+- (void)reapplyAppliedTweaks
+{
+    settings_requeue_applied_tweaks_for_reapply();
+    // The applied set is now empty and the queue bar has repopulated, so the
+    // button is no longer needed — hide it.
+    [self updateReapplyButtonVisibility];
 }
 
 - (void)refreshCatalog
