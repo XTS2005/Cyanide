@@ -476,7 +476,7 @@ static UIColor *colorForLogLine(NSString *line) {
     if ([content hasPrefix:@"[ota]"])         return [UIColor colorWithRed:1.00 green:0.88 blue:0.40 alpha:1.0]; // amber (lowercase variant)
     if ([content hasPrefix:@"[RESPRING]"])    return [UIColor colorWithRed:1.00 green:0.72 blue:0.30 alpha:1.0]; // orange
     if ([content hasPrefix:@"[5ICON]"])       return [UIColor colorWithRed:0.98 green:0.95 blue:0.55 alpha:1.0]; // pale yellow
-    if ([content hasPrefix:@"[KRW]"])         return [UIColor colorWithRed:1.00 green:0.55 blue:0.70 alpha:1.0]; // pink
+    if ([content hasPrefix:@"[KRW]"])         return [UIColor colorWithRed:0.70 green:0.56 blue:1.00 alpha:1.0]; // violet (was pink — read as an error next to [WARN]/[FAIL])
     if ([content hasPrefix:@"[PERSIST]"])     return [UIColor colorWithRed:0.70 green:0.75 blue:0.85 alpha:1.0]; // steel blue
     if ([content hasPrefix:@"[HSSPACE]"])     return [UIColor colorWithRed:0.50 green:0.95 blue:0.42 alpha:1.0]; // spring green
     if ([content hasPrefix:@"[DOCKSPACE]"])   return [UIColor colorWithRed:0.50 green:0.95 blue:0.42 alpha:1.0]; // spring green
