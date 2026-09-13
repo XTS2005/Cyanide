@@ -1463,7 +1463,14 @@ static const int64_t kLiveBackgroundTaskGraceSeconds = 10;
 static const useconds_t kAxonLiteLiveIntervalUS = 500000;
 static const useconds_t kAxonLiteLiveBackgroundIntervalUS = 1500000;
 static const NSUInteger kAxonLiteLiveMaxTicks = 43200;
-static const int kSettingsSpringBoardRCFirstExceptionTimeoutMS = 3000;
+// The SpringBoard EXC_GUARD hijack only traps when an injected thread runs, so a
+// loaded system (cold boot, or right after a heavy pe_v2 stage) can miss a tight
+// window. Use a roomier first timeout and retry once with a longer one before
+// failing the whole Run. Traps fire in <100 ms when healthy, so the higher
+// ceilings only cost time in the rare loaded case.
+static const int kSettingsSpringBoardRCFirstExceptionTimeoutMS = 5000;
+static const int kSettingsSpringBoardRCRetryTimeoutMS          = 12000;
+static const int kSettingsSpringBoardRCMaxAttempts             = 2;
 // Only Clock/Calendar need periodic repair; normal icons persist through the
 // model graft and should not be repainted during SpringBoard animations.
 static const useconds_t kThemerLiveIntervalUS = 2000000;
@@ -1601,6 +1608,32 @@ BOOL settings_tweak_is_applied(NSString *key)
 void settings_mark_tweak_needs_apply(NSString *key)
 {
     settings_mark_tweak_applied(key, NO);
+}
+
+// Re-queue every already-applied tweak so it shows in the queue and can be
+// applied again — without relaunching Cyanide. Relaunching normally re-queues
+// enabled tweaks because the in-memory applied set starts empty; this reproduces
+// that in-process by clearing that set, so parked-state re-apply can be tested
+// while the app stays open (closing/relaunching itself changes the primitive).
+// Mirrors a relaunch: only the process-local applied state is cleared;
+// persisted markers (QuickLoader/RepoTweaks) survive a relaunch and are left be.
+void settings_requeue_applied_tweaks_for_reapply(void)
+{
+    NSMutableSet<NSString *> *set = settings_applied_keys_set();
+    @synchronized (set) { [set removeAllObjects]; }
+    settings_notify_package_queue_changed_async();
+    log_user("[SETTINGS] Re-queued applied tweaks — apply again without relaunching.\n");
+}
+
+// True only while there are tweaks applied in THIS process session (the
+// in-memory applied set). It is empty on a fresh relaunch — where the queue
+// already re-shows the enabled tweaks — and non-empty after an in-session apply
+// emptied the queue. Drives the re-apply button's visibility: it's only useful
+// while Cyanide stays open.
+BOOL settings_has_reappliable_tweaks(void)
+{
+    NSMutableSet<NSString *> *set = settings_applied_keys_set();
+    @synchronized (set) { return set.count > 0; }
 }
 
 static BOOL settings_clear_all_applied_locked(void)
@@ -1923,6 +1956,35 @@ static BOOL settings_refresh_screen_lock_state(const char *reason)
     return old != newValue;
 }
 
+// Detach the KRW sockets to launchd when the screen sleeps and re-make them on
+// wake. This is the real sleep/wake signal for Cyanide (keep-alive keeps the app
+// running through a screen lock, so applicationDidEnterBackground does NOT fire).
+// Call AFTER settings_refresh_screen_awake_state has updated the cached state.
+// Reattach runs synchronously so the wake re-apply (StatBar etc., which uses
+// KRW) sees live fds; detach runs off-main because it stops live loops and waits.
+static void settings_krw_follow_screen_transition(void)
+{
+    static volatile int prevAwake = -1;
+    static dispatch_once_t qonce;
+    static dispatch_queue_t q;
+    dispatch_once(&qonce, ^{
+        q = dispatch_queue_create("com.cyanide.krw.screenfollow", DISPATCH_QUEUE_SERIAL);
+    });
+
+    int now = settings_screen_awake_cached() ? 1 : 0;
+    int prev = __sync_lock_test_and_set(&prevAwake, now);
+    if (prev == now || prev < 0) return;   // no transition, or first observation
+
+    if (now == 0) {
+        dispatch_async(q, ^{
+            if (settings_screen_awake_cached()) return;   // woke again before we ran
+            settings_detach_krw_for_background();
+        });
+    } else {
+        settings_reattach_krw_for_foreground();
+    }
+}
+
 static void settings_sync_fastlockx_lite_for_screen_state_async(const char *reason)
 {
     if (!settings_fastlockx_lite_install_allowed()) return;
@@ -2151,6 +2213,7 @@ static void settings_install_screen_awake_observers(void)
                                               dispatch_get_main_queue(), ^(int token) {
             (void)token;
             BOOL woke = settings_refresh_screen_awake_state("springboard.hasBlankedScreen");
+            settings_krw_follow_screen_transition();
             (void)settings_refresh_screen_lock_state("springboard.hasBlankedScreen");
             settings_sync_fastlockx_lite_for_screen_state_async("springboard.hasBlankedScreen");
             if (woke) {
@@ -2171,6 +2234,7 @@ static void settings_install_screen_awake_observers(void)
                                           dispatch_get_main_queue(), ^(int token) {
             (void)token;
             BOOL woke = settings_refresh_screen_awake_state("iokit.displayStatus");
+            settings_krw_follow_screen_transition();
             (void)settings_refresh_screen_lock_state("iokit.displayStatus");
             settings_sync_fastlockx_lite_for_screen_state_async("iokit.displayStatus");
             if (woke) {
@@ -2254,6 +2318,9 @@ static void settings_install_screen_awake_observers(void)
                                                            queue:[NSOperationQueue mainQueue]
                                                       usingBlock:^(NSNotification *note) {
             (void)note;
+            // Re-make the KRW fds from launchd if we detached them on background,
+            // before anything tries to use the primitive again.
+            settings_reattach_krw_for_foreground();
             (void)settings_refresh_screen_awake_state("app became active");
             settings_apply_statbar_once_async("app became active");
             settings_schedule_themer_quiet_repair_burst("app became active");
@@ -2730,17 +2797,27 @@ static BOOL settings_ensure_springboard_remote_call_locked(void)
         return YES;
     }
 
-    if (init_remote_call_with_first_exception_timeout("SpringBoard",
-                                                      false,
-                                                      kSettingsSpringBoardRCFirstExceptionTimeoutMS) != 0) {
-        printf("[SETTINGS] init_remote_call(SpringBoard) failed\n");
-        return NO;
+    for (int attempt = 1; attempt <= kSettingsSpringBoardRCMaxAttempts; attempt++) {
+        int timeoutMS = (attempt == 1) ? kSettingsSpringBoardRCFirstExceptionTimeoutMS
+                                       : kSettingsSpringBoardRCRetryTimeoutMS;
+        if (init_remote_call_with_first_exception_timeout("SpringBoard",
+                                                          false,
+                                                          timeoutMS) == 0) {
+            g_springboard_rc_ready = 1;
+            g_springboard_sandbox_escaped = 0;
+            settings_notify_remote_call_state_changed();
+            return YES;
+        }
+        printf("[SETTINGS] init_remote_call(SpringBoard) attempt %d/%d failed (timeout=%dms)\n",
+               attempt, kSettingsSpringBoardRCMaxAttempts, timeoutMS);
+        if (attempt < kSettingsSpringBoardRCMaxAttempts) {
+            log_user("[SESSION] SpringBoard channel didn't open yet — retrying...\n");
+            usleep(500000);   // brief settle before re-injecting the guard
+        }
     }
-
-    g_springboard_rc_ready = 1;
-    g_springboard_sandbox_escaped = 0;
-    settings_notify_remote_call_state_changed();
-    return YES;
+    printf("[SETTINGS] init_remote_call(SpringBoard) failed after %d attempts\n",
+           kSettingsSpringBoardRCMaxAttempts);
+    return NO;
 }
 
 static void settings_destroy_springboard_remote_call_locked_internal_ex(const char *reason, BOOL notifyState, BOOL preserveApplied)
@@ -2953,6 +3030,35 @@ void settings_park_krw_filter_for_background(void)
     if (!g_kexploit_done) return;
     bool parked = kexploit_krw_park_filter_safe();
     printf("[SETTINGS] background KRW filter park: %d\n", parked);
+}
+
+// Detach the KRW sockets to launchd on backgrounding so the primitive survives
+// device sleep (a session still held live by a suspended Cyanide dies across
+// sleep; one resting only in launchd's fileports does not). Live loops must be
+// stopped first: early_kread/kwrite abort hard if their socket fd disappears
+// mid-op. Falls back to the plain filter park when detach isn't available
+// (launchd not yet anchoring, or no live session).
+void settings_detach_krw_for_background(void)
+{
+    if (!g_kexploit_done) return;
+    settings_request_all_live_loops_stop("background KRW detach");
+    settings_wait_live_loops_stopped_for_switch("background KRW detach");
+    if (krw_persistence_detach_for_background()) {
+        printf("[SETTINGS] background: KRW sockets detached to launchd\n");
+    } else {
+        bool parked = kexploit_krw_park_filter_safe();
+        printf("[SETTINGS] background: detach unavailable; filter park=%d\n", parked);
+    }
+}
+
+// Re-make the KRW socket fds from launchd on foreground. On failure the primitive
+// is cleared, so the next Run cleanly re-exploits (no worse than before).
+void settings_reattach_krw_for_foreground(void)
+{
+    if (!kexploit_krw_sockets_detached()) return;
+    bool ok = krw_persistence_reattach_for_foreground();
+    printf("[SETTINGS] foreground: KRW reattach %s\n",
+           ok ? "ok" : "FAILED — next Run will re-exploit");
 }
 
 void settings_destroy_springboard_remote_call_sync(void)
@@ -6588,6 +6694,18 @@ static void settings_run_actions_internal(BOOL pendingOnly)
             }
 
             if (needsSpringBoard) {
+                // A fresh pe_v2 acquisition just wired/churned ~2 GB and hijacked
+                // launchd; the system is briefly loaded, which can make the
+                // SpringBoard EXC_GUARD hijack miss its trap window. Let it settle
+                // first. Recovery (parked) does no staging, so skip it there, and
+                // it's A18-only (pe_v1 stages little).
+                if (needsKernelPrimitiveStage &&
+                    !krw_persistence_is_recovered() &&
+                    settings_device_is_a18_above() &&
+                    [d integerForKey:kSettingsA18ExploitPath] != 1) {
+                    log_user("[SESSION] Cooling down after staging before opening SpringBoard...\n");
+                    usleep(2000000);   // 2s settle
+                }
                 @synchronized (settings_rc_lock()) {
                     settings_progress(&step, total, "Opening SpringBoard injection channel");
                     if (!settings_ensure_springboard_remote_call_locked()) {

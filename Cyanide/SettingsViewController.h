@@ -39,6 +39,8 @@ typedef NS_ENUM(NSInteger, SettingsSection) {
 };
 
 void settings_park_krw_filter_for_background(void);
+void settings_detach_krw_for_background(void);
+void settings_reattach_krw_for_foreground(void);
 
 extern NSString * const kSettingsA18ExploitPath;
 extern NSString * const kSettingsA18Interleave;
@@ -145,6 +147,14 @@ extern NSString * const kSettingsActionsDidCompleteMessageKey;
 // SpringBoard RemoteCall session goes away.
 BOOL settings_tweak_is_applied(NSString *key);
 void settings_mark_tweak_needs_apply(NSString *key);
+// Re-queue already-applied tweaks so they can be applied again without
+// relaunching Cyanide (relaunch-equivalent; clears only process-local applied
+// state). Fires PackageQueueDidChangeNotification so the queue/bar repopulate.
+void settings_requeue_applied_tweaks_for_reapply(void);
+// True only while tweaks are applied in the current session (queue emptied by an
+// in-session apply); false on a fresh relaunch where the queue already shows
+// them. Use to show the re-apply button only when it's useful.
+BOOL settings_has_reappliable_tweaks(void);
 
 void settings_register_defaults(void);
 BOOL settings_device_supported(void);
