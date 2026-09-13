@@ -888,7 +888,11 @@ NSString * const kSettingsLayoutHomeExtraLeft   = @"LayoutHomeExtraLeft";
 NSString * const kSettingsLayoutHomeExtraRight  = @"LayoutHomeExtraRight";
 NSString * const kSettingsLayoutHomeExtraTop    = @"LayoutHomeExtraTop";
 NSString * const kSettingsLayoutHomeExtraBottom = @"LayoutHomeExtraBottom";
-NSString * const kSettingsLayoutDockExtraHorizontal = @"LayoutDockExtraHorizontal";
+NSString * const kSettingsLayoutDockExtraLeft   = @"LayoutDockExtraLeft";
+NSString * const kSettingsLayoutDockExtraRight  = @"LayoutDockExtraRight";
+// Superseded by the separate L/R keys above; kept only so the one-time
+// migration in settings_register_defaults can read a persisted old value.
+static NSString * const kSettingsLayoutDockExtraHorizontalLegacy = @"LayoutDockExtraHorizontal";
 NSString * const kSettingsLayoutHomeScalePct    = @"LayoutHomeScalePct";
 NSString * const kSettingsLayoutDockScalePct    = @"LayoutDockScalePct";
 
@@ -3518,12 +3522,13 @@ static bool settings_apply_layout_extras_from_defaults_locked(NSUserDefaults *d)
     double exR  = (double)[d integerForKey:kSettingsLayoutHomeExtraRight];
     double exT  = (double)[d integerForKey:kSettingsLayoutHomeExtraTop];
     double exB  = (double)[d integerForKey:kSettingsLayoutHomeExtraBottom];
-    double dockExH = (double)[d integerForKey:kSettingsLayoutDockExtraHorizontal];
+    double dockExL = (double)[d integerForKey:kSettingsLayoutDockExtraLeft];
+    double dockExR = (double)[d integerForKey:kSettingsLayoutDockExtraRight];
     NSInteger hsPct = [d integerForKey:kSettingsLayoutHomeScalePct];
     NSInteger dkPct = [d integerForKey:kSettingsLayoutDockScalePct];
     double homeScale = (hsPct > 0) ? (double)hsPct / 100.0 : 1.0;
     double dockScale = (dkPct > 0) ? (double)dkPct / 100.0 : 1.0;
-    return darksword_layout_apply_in_session(exL, exR, exT, exB, dockExH, homeScale, dockScale);
+    return darksword_layout_apply_in_session(exL, exR, exT, exB, dockExL, dockExR, homeScale, dockScale);
 }
 
 static GravityLiteConfig settings_gravitylite_config_from_defaults(NSUserDefaults *d)
@@ -6198,7 +6203,8 @@ void settings_register_defaults(void)
         kSettingsLayoutHomeExtraRight:      @0,
         kSettingsLayoutHomeExtraTop:        @0,
         kSettingsLayoutHomeExtraBottom:     @0,
-        kSettingsLayoutDockExtraHorizontal: @0,
+        kSettingsLayoutDockExtraLeft:  @0,
+        kSettingsLayoutDockExtraRight: @0,
         kSettingsLayoutHomeScalePct:        @100,
         kSettingsLayoutDockScalePct:        @100,
 
@@ -6307,6 +6313,23 @@ void settings_register_defaults(void)
                    "(1.5.5 default restored)\n");
         }
         [defaults setBool:YES forKey:kSettingsA18ShapeThreeGBMigration];
+        [defaults synchronize];
+    }
+    // One-time: the single "Dock extra horizontal" padding became separate
+    // left/right sliders. Seed both new keys from any persisted old value so an
+    // existing symmetric setting carries over. One-shot flag, so later per-side
+    // edits are never clobbered.
+    static NSString * const kSettingsDockPadSplitMigration =
+        @"cyanide.dockpad.splitLR.v1";
+    if (![defaults boolForKey:kSettingsDockPadSplitMigration]) {
+        id oldDockH = [defaults objectForKey:kSettingsLayoutDockExtraHorizontalLegacy];
+        if (oldDockH != nil) {
+            [defaults setObject:oldDockH forKey:kSettingsLayoutDockExtraLeft];
+            [defaults setObject:oldDockH forKey:kSettingsLayoutDockExtraRight];
+            [defaults removeObjectForKey:kSettingsLayoutDockExtraHorizontalLegacy];
+            printf("[SETTINGS] Dock extra horizontal migrated -> separate L/R\n");
+        }
+        [defaults setBool:YES forKey:kSettingsDockPadSplitMigration];
         [defaults synchronize];
     }
     NSString *selectedDockBundle = [defaults stringForKey:kSettingsSBCDockAppBundleID];
@@ -6992,32 +7015,8 @@ void settings_run_pending_actions(void)
     settings_run_actions_internal(YES);
 }
 
-typedef NS_ENUM(NSInteger, SettingsSection) {
-    SectionWarning = 0,
-    SectionLaunch,
-    SectionActions,
-    SectionOTA,
-    SectionSBC,
-    SectionStatBar,
-    SectionNSBar,
-    SectionNiceBarLite,
-    SectionAxonLite,
-    SectionPowercuff,
-    SectionDarkSwordTweaks,
-    SectionDragCoefficient,
-    SectionLayoutExtras,
-    SectionNanoRegistry,
-    SectionThemer,
-    SectionSnowBoardLite,
-    SectionLiveWP,
-    SectionLocationSim,
-    SectionGravityLite,
-    SectionAppSwitcherGrid,
-    SectionFastLockXLite,
-    SectionQuickLoader,
-    SectionRepoTweaks,
-    SectionCount,
-};
+// SettingsSection enum moved to SettingsViewController.h so the package catalog
+// can reference the same values by name (see the note there).
 
 typedef NS_ENUM(NSInteger, RootSection) {
     RootSectionChangelog = 0,
@@ -7906,8 +7905,10 @@ static _CyanideMailDelegate *_cyanide_mail_delegate(void) {
            @"title": @"Home extra top",    @"min": @0,  @"max": @400, @"step": @1, @"unit": @"pt", @"default": @0 },
         @{ @"kind": @"number", @"key": kSettingsLayoutHomeExtraBottom,
            @"title": @"Home extra bottom", @"min": @0,  @"max": @400, @"step": @1, @"unit": @"pt", @"default": @0 },
-        @{ @"kind": @"number", @"key": kSettingsLayoutDockExtraHorizontal,
-           @"title": @"Dock extra horizontal", @"min": @0,  @"max": @200, @"step": @1, @"unit": @"pt", @"default": @0 },
+        @{ @"kind": @"number", @"key": kSettingsLayoutDockExtraLeft,
+           @"title": @"Dock extra left",  @"min": @0,  @"max": @200, @"step": @1, @"unit": @"pt", @"default": @0 },
+        @{ @"kind": @"number", @"key": kSettingsLayoutDockExtraRight,
+           @"title": @"Dock extra right", @"min": @0,  @"max": @200, @"step": @1, @"unit": @"pt", @"default": @0 },
         @{ @"kind": @"number", @"key": kSettingsLayoutHomeScalePct,
            @"title": @"Home icon scale",   @"min": @25, @"max": @250, @"step": @1, @"unit": @"%", @"default": @100 },
         @{ @"kind": @"number", @"key": kSettingsLayoutDockScalePct,
@@ -8235,7 +8236,9 @@ static _CyanideMailDelegate *_cyanide_mail_delegate(void) {
         [out addObject:@{@"title": @"Home extra T/B",   @"value": [NSString stringWithFormat:@"%ld/%ld",
                                                                     (long)[d integerForKey:kSettingsLayoutHomeExtraTop],
                                                                     (long)[d integerForKey:kSettingsLayoutHomeExtraBottom]]}];
-        [out addObject:@{@"title": @"Dock extra H",     @"value": [@([d integerForKey:kSettingsLayoutDockExtraHorizontal]) stringValue]}];
+        [out addObject:@{@"title": @"Dock extra L/R",   @"value": [NSString stringWithFormat:@"%ld/%ld",
+                                                                    (long)[d integerForKey:kSettingsLayoutDockExtraLeft],
+                                                                    (long)[d integerForKey:kSettingsLayoutDockExtraRight]]}];
         [out addObject:@{@"title": @"Home scale %",     @"value": [@([d integerForKey:kSettingsLayoutHomeScalePct]) stringValue]}];
         [out addObject:@{@"title": @"Dock scale %",     @"value": [@([d integerForKey:kSettingsLayoutDockScalePct]) stringValue]}];
     } else if (section == SectionStatBar) {

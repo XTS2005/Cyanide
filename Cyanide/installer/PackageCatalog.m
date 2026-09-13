@@ -103,25 +103,27 @@ static BOOL catalog_repo_script_requires_native_bridge(NSString *rawScript)
     }];
 }
 
-// Mirrors of the private SettingsSection enum values in SettingsViewController.m
-// (kept in sync — must match the underlying section indices used for the
-// detail-mode SettingsViewController push).
-static const NSInteger kSecSBC              = 4;
-static const NSInteger kSecStatBar          = 5;
-static const NSInteger kSecNSBar            = 6;
-static const NSInteger kSecNiceBarLite      = 7;
-static const NSInteger kSecPowercuff        = 12;
-static const NSInteger kSecDragCoefficient  = 14;
-static const NSInteger kSecLayoutExtras     = 15;
-static const NSInteger kSecNanoRegistry     = 16;
-static const NSInteger kSecSnowBoardLite    = 18;
-static const NSInteger kSecLiveWP           = 19;
-static const NSInteger kSecLocationSim      = 20;
-static const NSInteger kSecGravityLite      = 21;
-static const NSInteger kSecAppSwitcherGrid  = 22;
-static const NSInteger kSecFastLockXLite    = 24;
-static const NSInteger kSecQuickLoader      = 25;
-static const NSInteger kSecRepoTweaks       = 26;
+// Underlying section indices for the detail-mode SettingsViewController push.
+// Defined directly from the shared SettingsSection enum (SettingsViewController.h)
+// so they track the enum automatically — the previous hand-copied numbers had
+// drifted (e.g. kSecLayoutExtras was 15 = SectionSnowBoardLite, so "Customize
+// Home Layout Extras" opened the theme selector).
+static const NSInteger kSecSBC              = SectionSBC;
+static const NSInteger kSecStatBar          = SectionStatBar;
+static const NSInteger kSecNSBar            = SectionNSBar;
+static const NSInteger kSecNiceBarLite      = SectionNiceBarLite;
+static const NSInteger kSecPowercuff        = SectionPowercuff;
+static const NSInteger kSecDragCoefficient  = SectionDragCoefficient;
+static const NSInteger kSecLayoutExtras     = SectionLayoutExtras;
+static const NSInteger kSecNanoRegistry     = SectionNanoRegistry;
+static const NSInteger kSecSnowBoardLite    = SectionSnowBoardLite;
+static const NSInteger kSecLiveWP           = SectionLiveWP;
+static const NSInteger kSecLocationSim      = SectionLocationSim;
+static const NSInteger kSecGravityLite      = SectionGravityLite;
+static const NSInteger kSecAppSwitcherGrid  = SectionAppSwitcherGrid;
+static const NSInteger kSecFastLockXLite    = SectionFastLockXLite;
+static const NSInteger kSecQuickLoader      = SectionQuickLoader;
+static const NSInteger kSecRepoTweaks       = SectionRepoTweaks;
 
 + (NSArray<Package *> *)allPackages
 {

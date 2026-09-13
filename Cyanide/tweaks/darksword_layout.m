@@ -383,9 +383,10 @@ bool darksword_layout_home_spacing_in_session(double exL, double exR, double exT
     return ok;
 }
 
-bool darksword_layout_dock_spacing_in_session(double extraHorizontal)
+bool darksword_layout_dock_spacing_in_session(double extraLeft, double extraRight)
 {
-    printf("[DOCKSPACE] ios=%d extraH=%.2f\n", ds_layout_ios_major(), extraHorizontal);
+    printf("[DOCKSPACE] ios=%d extraL=%.2f extraR=%.2f\n",
+           ds_layout_ios_major(), extraLeft, extraRight);
     uint64_t ctrl = rc_icon_controller();
     if (!ctrl) return false;
     uint64_t mgr = rc_icon_manager_for(ctrl);
@@ -399,9 +400,9 @@ bool darksword_layout_dock_spacing_in_session(double extraHorizontal)
 
     RC_UIEdgeInsets ins = {
         .top    = 0.0,
-        .left   = 16.0 + extraHorizontal,
+        .left   = 16.0 + extraLeft,
         .bottom = 0.0,
-        .right  = 16.0 + extraHorizontal,
+        .right  = 16.0 + extraRight,
     };
     bool ok = rc_set_insets_on(dockCfg, clsInv, &ins);
     if (ok) rc_force_manager_relayout(mgr, clsInv);
@@ -503,13 +504,13 @@ bool darksword_layout_dock_scale_in_session(double scale)
 // user-set "extra padding" as a scale-down ratio. Effective padding:
 // w/h_new = w/h - (left+right) / -(top+bottom). The whole grid shrinks
 // inside its bounds, creating visible empty space at the edges. The
-// dock gets its own transform driven by dockExH.
+// dock gets its own transform driven by dockExL/dockExR.
 static bool darksword_layout_apply_in_session_ios26(double exL, double exR, double exT, double exB,
-                                                    double dockExH,
+                                                    double dockExL, double dockExR,
                                                     double homeScale, double dockScale)
 {
-    printf("[LAYOUT26] home=+L%.1f/R%.1f/T%.1f/B%.1f dock=+H%.1f homeScale=%.2f dockScale=%.2f\n",
-           exL, exR, exT, exB, dockExH, homeScale, dockScale);
+    printf("[LAYOUT26] home=+L%.1f/R%.1f/T%.1f/B%.1f dock=+L%.1f/R%.1f homeScale=%.2f dockScale=%.2f\n",
+           exL, exR, exT, exB, dockExL, dockExR, homeScale, dockScale);
 
     uint64_t clsListView = r_class("SBIconListView");
     if (!clsListView) { printf("[LAYOUT26] SBIconListView class missing\n"); return false; }
@@ -616,11 +617,17 @@ static bool darksword_layout_apply_in_session_ios26(double exL, double exR, doub
         if (haveFrame) {
             double w = frame[2], h = frame[3];
             double scaleX = 1.0, scaleY = 1.0;
+            double tx = 0.0;
             if (isDock) {
-                if (dockExH != 0.0 && w > 0.0) {
-                    double avail = w - 2.0 * dockExH;
+                double totH = dockExL + dockExR;
+                if (totH != 0.0 && w > 0.0) {
+                    double avail = w - totH;
                     if (avail > 0.0) scaleX = avail / w;
                     scaleY = scaleX;
+                    // Center-scaling removes totH/2 from each side; shift by
+                    // (L-R)/2 so the left gap ends up dockExL and the right
+                    // gap dockExR (a pure scale can only pad symmetrically).
+                    tx = (dockExL - dockExR) / 2.0;
                 }
                 if (dockScale > 0.0 && dockScale != 1.0) {
                     scaleX *= dockScale;
@@ -640,15 +647,15 @@ static bool darksword_layout_apply_in_session_ios26(double exL, double exR, doub
                     scaleY *= homeScale;
                 }
             }
-            if (scaleX != 1.0 || scaleY != 1.0) {
+            if (scaleX != 1.0 || scaleY != 1.0 || tx != 0.0) {
                 // CGAffineTransform: { a, b, c, d, tx, ty } — 6 doubles, 48 bytes.
-                // Pure scale: { sx, 0, 0, sy, 0, 0 }.
-                double xf[6] = { scaleX, 0.0, 0.0, scaleY, 0.0, 0.0 };
+                // Scale (+ optional horizontal shift for asymmetric dock pad).
+                double xf[6] = { scaleX, 0.0, 0.0, scaleY, tx, 0.0 };
                 r_msg2_main_raw(lv, "setTransform:",
                                 xf, sizeof(xf),
                                 NULL, 0, NULL, 0, NULL, 0);
-                printf("[LAYOUT26]   %s transform scale=(%.3f,%.3f) frameWxH=%.1fx%.1f\n",
-                       isDock ? "dock" : "home", scaleX, scaleY, w, h);
+                printf("[LAYOUT26]   %s transform scale=(%.3f,%.3f) tx=%.1f frameWxH=%.1fx%.1f\n",
+                       isDock ? "dock" : "home", scaleX, scaleY, tx, w, h);
                 anyOk = true;
             } else {
                 // Reset to identity in case a prior Run left a transform.
@@ -664,15 +671,16 @@ static bool darksword_layout_apply_in_session_ios26(double exL, double exR, doub
 }
 
 bool darksword_layout_apply_in_session(double exL, double exR, double exT, double exB,
-                                       double dockExH, double homeScale, double dockScale)
+                                       double dockExL, double dockExR,
+                                       double homeScale, double dockScale)
 {
     if (ds_layout_ios_major() >= 26) {
         return darksword_layout_apply_in_session_ios26(exL, exR, exT, exB,
-                                                        dockExH, homeScale, dockScale);
+                                                        dockExL, dockExR, homeScale, dockScale);
     }
     bool ok = true;
     ok &= darksword_layout_home_spacing_in_session(exL, exR, exT, exB);
-    ok &= darksword_layout_dock_spacing_in_session(dockExH);
+    ok &= darksword_layout_dock_spacing_in_session(dockExL, dockExR);
     if (homeScale > 0.0) ok &= darksword_layout_home_scale_in_session(homeScale);
     if (dockScale > 0.0) ok &= darksword_layout_dock_scale_in_session(dockScale);
     return ok;

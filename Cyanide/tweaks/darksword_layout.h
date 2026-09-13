@@ -20,8 +20,8 @@ bool darksword_layout_home_spacing_in_session(double extraLeft,
                                               double extraTop,
                                               double extraBottom);
 
-// Adds extra horizontal inset to the dock layout. Default left/right = 16.
-bool darksword_layout_dock_spacing_in_session(double extraHorizontal);
+// Adds extra left/right inset to the dock layout. Default left/right = 16.
+bool darksword_layout_dock_spacing_in_session(double extraLeft, double extraRight);
 
 // Sets per-icon image info (width/height/cornerRadius) at scale * 60pt.
 // scale must be in (0, 2].
@@ -34,7 +34,8 @@ bool darksword_layout_apply_in_session(double extraLeft,
                                        double extraRight,
                                        double extraTop,
                                        double extraBottom,
-                                       double extraDockHorizontal,
+                                       double extraDockLeft,
+                                       double extraDockRight,
                                        double homeScale,
                                        double dockScale);
 

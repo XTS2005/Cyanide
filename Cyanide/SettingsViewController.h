@@ -5,6 +5,39 @@
 
 #import <UIKit/UIKit.h>
 
+// Underlying section indices for the Settings tab and the detail-mode
+// SettingsViewController push (initWithUnderlyingSection:). Shared here so the
+// package catalog can reference these by name instead of duplicating the raw
+// numbers — the duplicated copy silently drifted once and mis-navigated every
+// package customize button past SectionNiceBarLite. Keep new sections appended
+// in display order.
+typedef NS_ENUM(NSInteger, SettingsSection) {
+    SectionWarning = 0,
+    SectionLaunch,
+    SectionActions,
+    SectionOTA,
+    SectionSBC,
+    SectionStatBar,
+    SectionNSBar,
+    SectionNiceBarLite,
+    SectionAxonLite,
+    SectionPowercuff,
+    SectionDarkSwordTweaks,
+    SectionDragCoefficient,
+    SectionLayoutExtras,
+    SectionNanoRegistry,
+    SectionThemer,
+    SectionSnowBoardLite,
+    SectionLiveWP,
+    SectionLocationSim,
+    SectionGravityLite,
+    SectionAppSwitcherGrid,
+    SectionFastLockXLite,
+    SectionQuickLoader,
+    SectionRepoTweaks,
+    SectionCount,
+};
+
 void settings_park_krw_filter_for_background(void);
 
 extern NSString * const kSettingsA18ExploitPath;
@@ -45,7 +78,8 @@ extern NSString * const kSettingsLayoutHomeExtraLeft;
 extern NSString * const kSettingsLayoutHomeExtraRight;
 extern NSString * const kSettingsLayoutHomeExtraTop;
 extern NSString * const kSettingsLayoutHomeExtraBottom;
-extern NSString * const kSettingsLayoutDockExtraHorizontal;
+extern NSString * const kSettingsLayoutDockExtraLeft;
+extern NSString * const kSettingsLayoutDockExtraRight;
 extern NSString * const kSettingsLayoutHomeScalePct;
 extern NSString * const kSettingsLayoutDockScalePct;
 
