@@ -940,11 +940,45 @@ uint64_t do_remote_call_stable_addr_internal(int timeout, uint64_t pcAddr, const
     }
 
     ExceptionMessage exc2;
+#if CY_TEST_ROBUST_RC_WAIT
+    // Robust return-trap wait (test builds only; enable with
+    // CY_EXTRA_DEFS="CY_TEST_ROBUST_RC_WAIT=1"). The trojan thread's LR is
+    // FAKE_LR_TROJAN (0x401); if we abandon this wait while that LR is still
+    // set, the target eventually returns, branches to 0x401, and crashes the
+    // host with SIGBUS at 0x401 (seen as SpringBoard crashing minutes after a
+    // live-loop tick when the app was briefly suspended/throttled). Instead of
+    // giving up after one timeout, keep re-waiting until the trap actually
+    // arrives so we always reply cleanly. Bail only if the session is torn down
+    // (its exception port is cleared) or a generous hard cap is hit (a call
+    // that is genuinely stuck), which matches the old give-up behaviour there.
+    {
+        int robustCapMS = (g_RC_stableExceptionTimeoutFloorMS > 0
+                           ? g_RC_stableExceptionTimeoutFloorMS * 12 : 120000);
+        int waitedMS = 0;
+        bool got = false;
+        while (true) {
+            got = wait_exception(g_RC_secondExceptionPort, &exc2, newTimeout, false);
+            if (got) break;
+            if (g_RC_secondExceptionPort == MACH_PORT_NULL) break; // session torn down
+            waitedMS += newTimeout;
+            if (waitedMS >= robustCapMS) break;                    // genuinely stuck
+            printf("[%s:%d] return trap not received yet; re-waiting (%d/%d ms)\n",
+                   __FUNCTION__, __LINE__, waitedMS, robustCapMS);
+        }
+        if (!got) {
+            printf("[%s:%d] Don't receive second exception on new thread (robust give-up)\n",
+                   __FUNCTION__, __LINE__);
+            g_RC_success = false;
+            return 0;
+        }
+    }
+#else
     if (!wait_exception(g_RC_secondExceptionPort, &exc2, newTimeout, false)) {
         printf("[%s:%d] Don't receive second exception on new thread\n", __FUNCTION__, __LINE__);
         g_RC_success = false;
         return 0;
     }
+#endif
     uint64_t retValue = exc2.threadState.__x[0];
     reply_with_state(&exc2, &exc2.threadState);
     if (remote_call_should_log_result(name, true))

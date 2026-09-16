@@ -69,6 +69,12 @@ fi
 if [ -n "${IPHONEOS_DEPLOYMENT_TARGET:-}" ]; then
     XCODEBUILD_EXTRA+=("IPHONEOS_DEPLOYMENT_TARGET=$IPHONEOS_DEPLOYMENT_TARGET")
 fi
+# Extra preprocessor defines for experimental/test builds, e.g.
+#   CY_EXTRA_DEFS="CY_TEST_ROBUST_RC_WAIT=1" ./build.sh
+# Off by default, so normal builds are unchanged.
+if [ -n "${CY_EXTRA_DEFS:-}" ]; then
+    XCODEBUILD_EXTRA+=("GCC_PREPROCESSOR_DEFINITIONS=\$(inherited) $CY_EXTRA_DEFS")
+fi
 
 mkdir -p build
 
