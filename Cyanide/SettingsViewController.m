@@ -8011,16 +8011,27 @@ static _CyanideMailDelegate *_cyanide_mail_delegate(void) {
             break;
         }
     }
-    // Switch tabs BEFORE unwinding the Settings stack. Popping first put the
-    // Settings root on screen for a frame -- the flash of the main Settings
-    // page you saw on the way back from a package's controls. Once the tab has
-    // changed, this nav controller's view is out of the hierarchy and the pop
-    // is invisible. The two outbound paths (PackageDetailViewController and
-    // CategoryPackagesViewController) already order it this way.
+    // Switch tabs first, then unwind the Settings stack on the NEXT runloop
+    // turn.
+    //
+    // Both have to happen, and doing them in either order within one turn
+    // shows the Settings root for a frame: the pop and the tab switch land in
+    // the same CATransaction, so the root gets laid out and composited before
+    // the tab swap is drawn. Verified by recording the transition at 59 fps on
+    // an iOS 26.3 simulator -- one frame of Quick Actions / Tweaks between the
+    // package's controls and the package detail, in both orderings.
+    //
+    // Deferring the pop puts it after that transaction has been drawn, by
+    // which point this navigation controller's view is out of the hierarchy
+    // and nothing it does can reach the screen. The stack still has to be
+    // unwound (otherwise tapping Settings later lands back on the package's
+    // controls); it just must not happen while anyone can see it.
     if (installerIdx != NSNotFound) {
         tab.selectedIndex = installerIdx;
     }
-    [settingsNav popToRootViewControllerAnimated:NO];
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [settingsNav popToRootViewControllerAnimated:NO];
+    });
 }
 
 - (void)selectBottomTabNamed:(NSString *)title
