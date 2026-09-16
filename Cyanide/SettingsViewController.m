@@ -3094,6 +3094,26 @@ void settings_park_krw_filter_for_background(void)
     printf("[SETTINGS] background KRW filter park: %d\n", parked);
 }
 
+// Whether handing the sockets to launchd is worth doing right now.
+//
+// It is always *safe*: every KRW access funnels through early_kread /
+// early_kwrite32bytes, which re-make the fds via krw_lock_for_access() before
+// taking krwLock, and the detach closes them under that same lock. But it is
+// only *useful* when nothing is about to take them straight back. A live tweak
+// loop reattaches on its next tick, so detaching around one is pure churn --
+// and for a loop slower than the idle threshold it would detach and reattach
+// on every cycle, logging a line each time.
+//
+// So while live tweaks hold the session, the primitive stays in this process
+// and dies with it. Screen-lock and backgrounding are still covered: those
+// paths stop the loops first, then detach.
+BOOL settings_krw_idle_detach_allowed(void)
+{
+    if (settings_any_registered_live_loop_running()) return NO;
+    if (settings_has_persistent_springboard_remote_call_user()) return NO;
+    return YES;
+}
+
 // Detach the KRW sockets to launchd on backgrounding so the primitive survives
 // device sleep (a session still held live by a suspended Cyanide dies across
 // sleep; one resting only in launchd's fileports does not). Live loops must be
