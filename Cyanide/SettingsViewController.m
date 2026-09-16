@@ -7386,6 +7386,8 @@ static NSString *settings_pretty_date_for_iso(NSString *iso)
 @property (nonatomic, assign) NSInteger underlyingSection;
 @property (nonatomic, copy)   NSString *bundleTitle;
 @property (nonatomic, assign) BOOL changelogExpanded;
+// Set by returnToInstaller; consumed in viewDidDisappear. See both.
+@property (nonatomic, assign) BOOL unwindSettingsStackWhenHidden;
 @property (nonatomic, copy)   NSString *pendingThemeImportMode;
 @property (nonatomic, assign) BOOL qlStandalone;
 @property (nonatomic, strong) NSString *qlScriptName;
@@ -8013,27 +8015,40 @@ static _CyanideMailDelegate *_cyanide_mail_delegate(void) {
             break;
         }
     }
-    // Switch tabs first, then unwind the Settings stack on the NEXT runloop
-    // turn.
+    // Switch tabs; unwind the Settings stack later, from viewDidDisappear.
     //
-    // Both have to happen, and doing them in either order within one turn
-    // shows the Settings root for a frame: the pop and the tab switch land in
-    // the same CATransaction, so the root gets laid out and composited before
-    // the tab swap is drawn. Verified by recording the transition at 59 fps on
-    // an iOS 26.3 simulator -- one frame of Quick Actions / Tweaks between the
-    // package's controls and the package detail, in both orderings.
+    // Both have to happen, and any attempt to time the unwind against the tab
+    // switch shows the Settings root for a frame -- it gets laid out and
+    // composited before the tab swap is drawn. Popping first, popping after,
+    // and deferring the pop by one runloop turn were all tried; recording the
+    // transition at 59 fps caught the flash in each of them on at least one
+    // iOS version.
     //
-    // Deferring the pop puts it after that transaction has been drawn, by
-    // which point this navigation controller's view is out of the hierarchy
-    // and nothing it does can reach the screen. The stack still has to be
-    // unwound (otherwise tapping Settings later lands back on the package's
-    // controls); it just must not happen while anyone can see it.
-    if (installerIdx != NSNotFound) {
-        tab.selectedIndex = installerIdx;
-    }
-    dispatch_async(dispatch_get_main_queue(), ^{
+    // So stop guessing when the view is off screen and let UIKit say so.
+    // viewDidDisappear: runs once this controller is genuinely out of the
+    // hierarchy, which is exactly the condition the pop needs, on every
+    // version. The stack still has to be unwound -- otherwise tapping Settings
+    // later lands back on the package's controls -- just not while anyone can
+    // see it.
+    if (installerIdx == NSNotFound) {
+        // No installer tab to switch to; nothing will hide us, so pop now.
         [settingsNav popToRootViewControllerAnimated:NO];
-    });
+        return;
+    }
+    self.unwindSettingsStackWhenHidden = YES;
+    tab.selectedIndex = installerIdx;
+}
+
+- (void)viewDidDisappear:(BOOL)animated
+{
+    [super viewDidDisappear:animated];
+    if (!self.unwindSettingsStackWhenHidden) return;
+    self.unwindSettingsStackWhenHidden = NO;
+
+    // Capture before popping: this controller leaves the stack here, and
+    // self.navigationController is nil afterwards.
+    UINavigationController *nav = self.navigationController;
+    [nav popToRootViewControllerAnimated:NO];
 }
 
 - (void)selectBottomTabNamed:(NSString *)title
