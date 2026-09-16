@@ -112,19 +112,13 @@ typedef NS_ENUM(NSInteger, PackageDetailSection) {
     [presenter presentViewController:alert animated:YES completion:nil];
 }
 
-- (BOOL)isOTAPackage
-{
-    return self.package.kind == PackageInstallKindOTA;
-}
-
 // "Manual-control" packages are stateless from the Installer's POV: the user
-// just queues an install or uninstall intent and confirms. OTA and the
-// NanoRegistry override both fit. The detail view shows a menu instead of a
+// just queues an install or uninstall intent and confirms. The NanoRegistry
+// override is the archetype. The detail view shows a menu instead of a
 // toggle button so the user sees both options.
 - (BOOL)isManualPackage
 {
-    return self.package.kind == PackageInstallKindOTA
-        || self.package.kind == PackageInstallKindNanoRegistry
+    return self.package.kind == PackageInstallKindNanoRegistry
         || self.package.kind == PackageInstallKindCallRecordingSound
         || self.package.kind == PackageInstallKindHideHomeBar;
 }

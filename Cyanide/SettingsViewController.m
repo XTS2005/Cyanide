@@ -2755,6 +2755,49 @@ static BOOL settings_ensure_kexploit(void)
     return YES;
 }
 
+// True when a KRW session can be had without running the exploit: one is
+// already live in this process, or a parked primitive is on disk for this
+// boot. Cheap on purpose (no kernel round-trip, no I/O beyond NSUserDefaults)
+// so cellForRowAtIndexPath can ask on every reload.
+static BOOL settings_krw_available_without_exploit(void)
+{
+    if (g_kexploit_done && kexploit_krw_session_active()) return YES;
+    return krw_persistence_has_saved_recovery();
+}
+
+// settings_ensure_kexploit() for read-only actions.
+//
+// Recovers a parked session, but refuses to run a fresh exploit chain. The
+// plain version acquires KRW by whatever means necessary, which turned a
+// "Read Current Value" tap into a full A18 chain run and panicked the device
+// on 2026-09-16 12:01 (same aperture signature as the other 14, 2.5 GB
+// footprint from the live staging mapping). A query must never cost that.
+static BOOL settings_ensure_kexploit_for_read(void)
+{
+    if (!settings_device_supported()) {
+        printf("[SETTINGS] unsupported device: %s\n", settings_unsupported_message().UTF8String);
+        return NO;
+    }
+
+    if (g_kexploit_done) {
+        if (kexploit_krw_ready()) return YES;
+        printf("[SETTINGS] cached KRW is stale; read-only action will not re-exploit\n");
+        g_kexploit_done = NO;
+        g_springboard_rc_ready = 0;
+        g_springboard_sandbox_escaped = 0;
+        kutils_reset_self_cache();
+        settings_notify_remote_call_state_changed();
+    }
+
+    if (kexploit_opa334_recover_only() != 0) {
+        printf("[SETTINGS] read-only action: no parked session to recover; not re-exploiting\n");
+        return NO;
+    }
+    g_kexploit_done = YES;
+    settings_notify_remote_call_state_changed();
+    return YES;
+}
+
 static BOOL settings_device_is_a18_above(void)
 {
     static BOOL result = NO;
@@ -3051,6 +3094,26 @@ void settings_park_krw_filter_for_background(void)
     printf("[SETTINGS] background KRW filter park: %d\n", parked);
 }
 
+// Whether handing the sockets to launchd is worth doing right now.
+//
+// It is always *safe*: every KRW access funnels through early_kread /
+// early_kwrite32bytes, which re-make the fds via krw_lock_for_access() before
+// taking krwLock, and the detach closes them under that same lock. But it is
+// only *useful* when nothing is about to take them straight back. A live tweak
+// loop reattaches on its next tick, so detaching around one is pure churn --
+// and for a loop slower than the idle threshold it would detach and reattach
+// on every cycle, logging a line each time.
+//
+// So while live tweaks hold the session, the primitive stays in this process
+// and dies with it. Screen-lock and backgrounding are still covered: those
+// paths stop the loops first, then detach.
+BOOL settings_krw_idle_detach_allowed(void)
+{
+    if (settings_any_registered_live_loop_running()) return NO;
+    if (settings_has_persistent_springboard_remote_call_user()) return NO;
+    return YES;
+}
+
 // Detach the KRW sockets to launchd on backgrounding so the primitive survives
 // device sleep (a session still held live by a suspended Cyanide dies across
 // sleep; one resting only in launchd's fileports does not). Live loops must be
@@ -3060,6 +3123,11 @@ void settings_park_krw_filter_for_background(void)
 void settings_detach_krw_for_background(void)
 {
     if (!g_kexploit_done) return;
+    if (kexploit_krw_sockets_detached()) {
+        // The idle parker already handed the fds over; nothing left to do.
+        printf("[SETTINGS] background: KRW already detached to launchd\n");
+        return;
+    }
     settings_request_all_live_loops_stop("background KRW detach");
     settings_wait_live_loops_stopped_for_switch("background KRW detach");
     if (krw_persistence_detach_for_background()) {
@@ -3070,14 +3138,23 @@ void settings_detach_krw_for_background(void)
     }
 }
 
-// Re-make the KRW socket fds from launchd on foreground. On failure the primitive
-// is cleared, so the next Run cleanly re-exploits (no worse than before).
+// Deliberately does NOT pull the fds back on wake any more.
+//
+// It used to reattach eagerly, because the wake re-apply (StatBar and friends)
+// needed live fds. krw_lock_for_access() now re-makes them on the next kernel
+// access instead, so the eager version only put the primitive back in the
+// app's hands for no reason -- and that is where it dies. 20260916-134338 is
+// the whole story in one log: handed to launchd at 13:43:44, survived the
+// screen sleeping at 13:43:46, then reattached on wake at 13:46:11 with
+// nothing asking for it, and was dead by 13:50:31. The next Run re-exploited.
+//
+// Leaving it detached costs one bootstrap_look_up on the next access and keeps
+// the primitive where it demonstrably survives.
 void settings_reattach_krw_for_foreground(void)
 {
     if (!kexploit_krw_sockets_detached()) return;
-    bool ok = krw_persistence_reattach_for_foreground();
-    printf("[SETTINGS] foreground: KRW reattach %s\n",
-           ok ? "ok" : "FAILED — next Run will re-exploit");
+    printf("[SETTINGS] foreground: KRW left resting in launchd; "
+           "next kernel access re-makes the fds\n");
 }
 
 void settings_destroy_springboard_remote_call_sync(void)
@@ -3687,8 +3764,8 @@ static long long settings_read_lock_screen_duration(void)
         return -3;
     }
     @try {
-        if (!settings_ensure_kexploit()) {
-            printf("[LSD] read: kernel primitives were not acquired\n");
+        if (!settings_ensure_kexploit_for_read()) {
+            printf("[LSD] read: no kernel access; not running the exploit for a read\n");
             return -2;
         }
         @synchronized (settings_rc_lock()) {
@@ -4109,7 +4186,9 @@ static bool settings_apply_ota_disabled_body(BOOL disable)
     return ok;
 }
 
-BOOL settings_apply_ota_disabled(BOOL disable)
+// File-local since the OTA package stopped committing through the install
+// queue; settings_run_ota_action() below is the only caller.
+static BOOL settings_apply_ota_disabled(BOOL disable)
 {
     if (__sync_lock_test_and_set(&g_settings_actions_running, 1)) {
         printf("[SETTINGS] actions already running; ignoring OTA request\n");
@@ -4133,8 +4212,8 @@ static int settings_read_ota_status(void)
         return -3;
     }
     @try {
-        if (!settings_ensure_kexploit()) {
-            printf("[OTA] status read: kernel primitives were not acquired\n");
+        if (!settings_ensure_kexploit_for_read()) {
+            printf("[OTA] status read: no kernel access; not running the exploit for a read\n");
             return -2;
         }
         return darksword_ota_read_disabled();
@@ -4338,8 +4417,9 @@ static void settings_run_nano_probe_action(void)
             return;
         }
         @try {
-            if (!settings_ensure_kexploit()) {
-                log_user("[NANO-PROBE] Failed: kernel primitives were not acquired. Please try running chain again.\n");
+            if (!settings_ensure_kexploit_for_read()) {
+                log_user("[NANO-PROBE] Failed: no kernel access. Run the chain first — a probe "
+                         "will not start the exploit on its own.\n");
             } else {
                 (void)nano_registry_probe_pairing_assets();
             }
@@ -6350,13 +6430,15 @@ void settings_register_defaults(void)
 {
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
     [defaults registerDefaults:@{
-        // pe_v1 is the default. It has a measured ~57%% A18 acquire rate
-        // (4/7 on iPhone16,2 / iOS 18.5); pe_v2 has never acquired on A18 in
-        // testing — its confirm-read race cannot win within the safe number of
-        // OOB attempts, so it always aborts cleanly without finishing. pe_v2's
-        // clean-abort safety and its failure to acquire are the same property,
-        // so it stays the fallback until that changes. Must be the default
-        // because reinstalling a sideloaded build wipes NSUserDefaults.
+        // pe_v1 (stored as 1) stays the default. pe_v2 looked better over 44
+        // fresh chain runs on iPhone17,2 / iOS 18.5 22F76 — 12/21 acquired
+        // against 10/23, 5/21 panics against 9/23 — but neither gap is
+        // significant (Fisher p=0.55 and p=0.34, confidence intervals almost
+        // fully overlapping), so there is no evidence to change what ships.
+        // What the logs do disprove is the old claim that pe_v2 has never
+        // acquired on A18: it did, 12 times. See kexploit_opa334.m.
+        // Must be spelled out as a registered default because reinstalling a
+        // sideloaded build wipes NSUserDefaults.
         kSettingsA18ExploitPath:     @1,
         // Off by default: baseline bulk-spray + forward-scan is the proven pe_v1
         // path (~4/7). Interleave+reverse-scan (approach A) pins the find to the
@@ -7931,10 +8013,27 @@ static _CyanideMailDelegate *_cyanide_mail_delegate(void) {
             break;
         }
     }
-    [settingsNav popToRootViewControllerAnimated:NO];
+    // Switch tabs first, then unwind the Settings stack on the NEXT runloop
+    // turn.
+    //
+    // Both have to happen, and doing them in either order within one turn
+    // shows the Settings root for a frame: the pop and the tab switch land in
+    // the same CATransaction, so the root gets laid out and composited before
+    // the tab swap is drawn. Verified by recording the transition at 59 fps on
+    // an iOS 26.3 simulator -- one frame of Quick Actions / Tweaks between the
+    // package's controls and the package detail, in both orderings.
+    //
+    // Deferring the pop puts it after that transaction has been drawn, by
+    // which point this navigation controller's view is out of the hierarchy
+    // and nothing it does can reach the screen. The stack still has to be
+    // unwound (otherwise tapping Settings later lands back on the package's
+    // controls); it just must not happen while anyone can see it.
     if (installerIdx != NSNotFound) {
         tab.selectedIndex = installerIdx;
     }
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [settingsNav popToRootViewControllerAnimated:NO];
+    });
 }
 
 - (void)selectBottomTabNamed:(NSString *)title
@@ -8130,7 +8229,8 @@ static _CyanideMailDelegate *_cyanide_mail_delegate(void) {
     return @[
         @{ @"kind": @"button", @"title": @"Disable OTA Updates" },
         @{ @"kind": @"button", @"title": @"Enable OTA Updates" },
-        @{ @"kind": @"button", @"title": @"Read Current Status" },
+        @{ @"kind": @"button", @"title": @"Read Current Status",
+           @"requiresKRW": @YES },
     ];
 }
 
@@ -8212,7 +8312,9 @@ static _CyanideMailDelegate *_cyanide_mail_delegate(void) {
            @"subtitle": @"Clears the floor; offers a respring to apply." },
         @{ @"kind": @"button", @"action": @"lockdur-read",
            @"title": @"Read Current Value",
-           @"subtitle": @"Shows the floor currently written in SpringBoard." },
+           @"requiresKRW": @YES,
+           @"subtitle": @"Shows the floor currently written in SpringBoard. "
+                        @"Needs kernel access — run the chain first." },
     ];
 }
 
@@ -8838,7 +8940,14 @@ static _CyanideMailDelegate *_cyanide_mail_delegate(void) {
         return @"Adds extra padding and per-icon scaling on top of the stock home/dock layout. Defaults are zero padding and 100% scale (no change). Toggle Enable on and hit Run to apply; values aren't persisted across respring.";
     }
     if (s == SectionOTA) {
-        return @"Edits launchd disabled.plist. A reboot or userspace restart is required for changes to take effect.";
+        return @"Blocks or restores the launchd jobs that run over-the-air system updates. "
+               @"Tap Disable OTA Updates to block them or Enable OTA Updates to restore them — "
+               @"like Lock Screen Duration these are manual actions, written immediately with no "
+               @"Run or Apply step, and the state persists across reboots. Read Current Status "
+               @"reports whether the update daemons are currently blocked. "
+               @"Run the chain at least once first so kernel access is active. "
+               @"Edits launchd disabled.plist; a reboot or userspace restart is required for "
+               @"changes to take effect.";
     }
     if (s == SectionNanoRegistry) {
         return @"Changes the watchOS pairing range saved on this iPhone.\n\n"
@@ -10761,6 +10870,13 @@ void cyanide_present_contact(UIViewController *host)
         if (indexPath.section == SectionNanoRegistry &&
             [action isEqualToString:@"nano-load"]) {
             rowSupported = settings_nano_load_override_enabled();
+        }
+        // Read-only queries need a KRW session but must never start one --
+        // see settings_ensure_kexploit_for_read(). Grey them out until the
+        // chain has run (or a parked session is recoverable) so the button
+        // reads as unavailable instead of silently doing nothing.
+        if (rowSupported && [row[@"requiresKRW"] boolValue]) {
+            rowSupported = settings_krw_available_without_exploit();
         }
         UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"button" forIndexPath:dequeuePath];
         cell.selectionStyle = rowSupported ? UITableViewCellSelectionStyleDefault : UITableViewCellSelectionStyleNone;

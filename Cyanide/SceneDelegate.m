@@ -57,44 +57,15 @@
     UITabBarController *tab = (UITabBarController *)self.window.rootViewController;
     if (![tab isKindOfClass:UITabBarController.class]) return;
     // UpdateChecker walks `presentedViewController` to find the topmost VC and
-    // presents from there, so if the Signal prompt is up, the update prompt can
-    // still surface independently.
+    // presents from there, so the update prompt surfaces above whatever is up.
     [[UpdateChecker shared] checkForUpdatesIfNeededFrom:tab];
-}
-
-- (void)showSignalGroupNoticeIfNeeded {
-    NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
-    NSString *noticeKey = @"cyanide.community.signalGroupNoticeShown";
-    if ([ud boolForKey:noticeKey]) return;
-
-    UIViewController *root = self.window.rootViewController;
-    if (!root) return;
-    NSString *msg = @"Created a Signal group as the main place for Cyanide feedback and support.\n\nUse it to report bugs, request features, share test results, ask setup questions, and get notes about new builds.";
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Join the Cyanide Signal Group"
-                                                                   message:msg
-                                                            preferredStyle:UIAlertControllerStyleAlert];
-    [alert addAction:[UIAlertAction actionWithTitle:@"Join Signal" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
-        [ud setBool:YES forKey:noticeKey];
-        [ud synchronize];
-        NSURL *url = [NSURL URLWithString:@"https://signal.group/#CjQKIP0pxjc9V52ddCNk--04DosuoQl-vVOsznJfQ4GwlrlxEhCveFhBS8YdNcILpUFt7IqC"];
-        if (url) {
-            [[UIApplication sharedApplication] openURL:url options:@{} completionHandler:nil];
-        }
-    }]];
-    [alert addAction:[UIAlertAction actionWithTitle:@"Not Now" style:UIAlertActionStyleCancel handler:^(UIAlertAction *a) {
-        [ud setBool:YES forKey:noticeKey];
-        [ud synchronize];
-    }]];
-    [root presentViewController:alert animated:YES completion:nil];
 }
 
 - (void)sceneDidBecomeActive:(UIScene *)scene {
     [self selectInitialTabIfNeeded];
     settings_application_did_become_active();
-    // Independent paths: Signal group notice (one-time) and update
-    // check (every foreground; UpdateChecker enforces a per-process + 24-hour
-    // persisted throttle so the API isn't hammered).
-    [self showSignalGroupNoticeIfNeeded];
+    // Runs every foreground; UpdateChecker enforces a per-process + 24-hour
+    // persisted throttle so the API isn't hammered.
     [self runUpdateCheck];
 }
 

@@ -41,6 +41,11 @@ typedef NS_ENUM(NSInteger, SettingsSection) {
 
 void settings_park_krw_filter_for_background(void);
 void settings_detach_krw_for_background(void);
+// True when the KRW primitive can be handed to launchd without anything in
+// the app immediately taking it back: no live tweak loop is running and no
+// applied tweak is holding the SpringBoard session open. Consulted by the
+// kexploit layer before it parks the primitive in launchd.
+BOOL settings_krw_idle_detach_allowed(void);
 void settings_reattach_krw_for_foreground(void);
 
 extern NSString * const kSettingsA18ExploitPath;
@@ -165,7 +170,6 @@ BOOL settings_device_supported(void);
 // configured, else mailto: fallback) prefilled with the latest diagnostic log
 // inline. Presented from `host`.
 void cyanide_present_contact(UIViewController *host);
-BOOL settings_apply_ota_disabled(BOOL disabled);
 BOOL settings_themer_has_selected_theme(void);
 NSString *settings_themer_selected_theme_display_name(void);
 BOOL settings_snowboardlite_has_selected_theme(void);

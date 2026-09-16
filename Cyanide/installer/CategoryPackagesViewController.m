@@ -215,8 +215,9 @@ static NSString * const kCatPkgCellID = @"CatPkgCell";
         return [self pillWithText:@"DISABLED" background:[[UIColor systemRedColor] colorWithAlphaComponent:0.16] textColor:UIColor.systemRedColor];
     }
     if (pkg.kind == PackageInstallKindDirectTool ||
-        ((pkg.kind == PackageInstallKindOTA || pkg.kind == PackageInstallKindNanoRegistry ||
-          pkg.kind == PackageInstallKindCallRecordingSound || pkg.kind == PackageInstallKindHideHomeBar))) {
+        pkg.kind == PackageInstallKindNanoRegistry ||
+        pkg.kind == PackageInstallKindCallRecordingSound ||
+        pkg.kind == PackageInstallKindHideHomeBar) {
         if (intent != PackageQueueIntentNone) {
             return [self pillWithText:@"PENDING" background:[self.view.tintColor colorWithAlphaComponent:0.18] textColor:self.view.tintColor];
         }

@@ -14,11 +14,6 @@ typedef NS_ENUM(NSInteger, PackageInstallKind) {
     // sets it to YES; uninstalling sets NO. settings_run_actions() applies.
     PackageInstallKindToggle = 0,
 
-    // Persistent system tweak that does not use settings_run_actions().
-    // Installing calls darksword_ota_set_disabled(true); uninstalling calls
-    // darksword_ota_set_disabled(false). State tracked in a defaults intent key.
-    PackageInstallKindOTA = 1,
-
     // One-shot plist edit gated by kexploit + sandbox patch (NanoRegistry
     // watchOS pairing-compatibility override). Installing calls
     // settings_apply_nano_registry_now(YES) which writes the four

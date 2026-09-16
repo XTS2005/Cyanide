@@ -125,6 +125,7 @@ static const NSInteger kSecFastLockXLite    = SectionFastLockXLite;
 static const NSInteger kSecQuickLoader      = SectionQuickLoader;
 static const NSInteger kSecRepoTweaks       = SectionRepoTweaks;
 static const NSInteger kSecLockScreenDuration = SectionLockScreenDuration;
+static const NSInteger kSecOTA              = SectionOTA;
 
 + (NSArray<Package *> *)allPackages
 {
@@ -443,17 +444,24 @@ static const NSInteger kSecLockScreenDuration = SectionLockScreenDuration;
                                           isNew:NO];
         hideHomeBar.unstableWarning = @"Beta: system asset page zeroing. Run by itself, then respring after hiding. To restore the home indicator, choose Restore Home Bar and respring.";
 
+        // Manual tool (DirectTool), same shape as Lock Screen Duration: the
+        // detail view offers Open Controls, which opens the OTA Updates
+        // section in Settings where Disable / Enable / Read Current Status
+        // act immediately. It was a queued Disable/Enable menu before, which
+        // routed a one-tap system-file edit through the install queue for no
+        // benefit and split the read button off into Settings on its own.
         Package *otaBlock = [[Package alloc] initWithIdentifier:@"com.darksword.ota-block"
                                            name:@"OTA Updates"
                                shortDescription:@"Enable or disable over-the-air system updates"
-                                longDescription:@"Disables or enables the launchd jobs responsible for over-the-air system updates by editing disabled.plist. State persists across reboots.\n\nSystem-file warning: this edits /private/var/db/com.apple.xpc.launchd/disabled.plist. Incorrect or partial writes can affect launchd job state across boot. You disable or re-enable OTA updates at your own risk.\n\nNo Run/Apply step required for this package. Use Disable to block OTA updates, or Enable to restore them. Read Current Status reports whether the update daemons are currently blocked.\n\nVersion 1.1 adds a Read Current Status control."
-                                        version:@"1.1"
+                                longDescription:@"Disables or enables the launchd jobs responsible for over-the-air system updates by editing disabled.plist. State persists across reboots.\n\nSystem-file warning: this edits /private/var/db/com.apple.xpc.launchd/disabled.plist. Incorrect or partial writes can affect launchd job state across boot. You disable or re-enable OTA updates at your own risk.\n\nThis is a manual tool, not a queued package. Open Controls, then tap Disable OTA Updates to block them or Enable OTA Updates to restore them; the change is written immediately, with no Run or Apply step. Read Current Status reports whether the update daemons are currently blocked.\n\nRun the chain at least once first so kernel access is active — Read Current Status will not start it on its own.\n\nVersion 1.2 moves the controls into Settings; 1.1 added Read Current Status."
+                                        version:@"1.2"
                                          author:@"kolbicz"
                                        category:@"System"
                                      symbolName:@"icloud.slash.fill"
-                                          kind:PackageInstallKindOTA
+                                          kind:PackageInstallKindDirectTool
                                     enabledKey:nil
                                          isNew:NO];
+        otaBlock.settingsSection = kSecOTA;
         otaBlock.unstableWarning = @"Warning: persistent system-file edit. This package modifies launchd disabled.plist to change OTA job state across reboot. Disable or re-enable OTA updates at your own risk.";
 
         Package *disableAppLibrary = [[Package alloc] initWithIdentifier:@"com.darksword.disable-app-library"
