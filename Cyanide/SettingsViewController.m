@@ -8011,10 +8011,16 @@ static _CyanideMailDelegate *_cyanide_mail_delegate(void) {
             break;
         }
     }
-    [settingsNav popToRootViewControllerAnimated:NO];
+    // Switch tabs BEFORE unwinding the Settings stack. Popping first put the
+    // Settings root on screen for a frame -- the flash of the main Settings
+    // page you saw on the way back from a package's controls. Once the tab has
+    // changed, this nav controller's view is out of the hierarchy and the pop
+    // is invisible. The two outbound paths (PackageDetailViewController and
+    // CategoryPackagesViewController) already order it this way.
     if (installerIdx != NSNotFound) {
         tab.selectedIndex = installerIdx;
     }
+    [settingsNav popToRootViewControllerAnimated:NO];
 }
 
 - (void)selectBottomTabNamed:(NSString *)title
