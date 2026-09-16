@@ -8919,7 +8919,14 @@ static _CyanideMailDelegate *_cyanide_mail_delegate(void) {
         return @"Adds extra padding and per-icon scaling on top of the stock home/dock layout. Defaults are zero padding and 100% scale (no change). Toggle Enable on and hit Run to apply; values aren't persisted across respring.";
     }
     if (s == SectionOTA) {
-        return @"Edits launchd disabled.plist. A reboot or userspace restart is required for changes to take effect.";
+        return @"Blocks or restores the launchd jobs that run over-the-air system updates. "
+               @"Tap Disable OTA Updates to block them or Enable OTA Updates to restore them — "
+               @"like Lock Screen Duration these are manual actions, written immediately with no "
+               @"Run or Apply step, and the state persists across reboots. Read Current Status "
+               @"reports whether the update daemons are currently blocked. "
+               @"Run the chain at least once first so kernel access is active. "
+               @"Edits launchd disabled.plist; a reboot or userspace restart is required for "
+               @"changes to take effect.";
     }
     if (s == SectionNanoRegistry) {
         return @"Changes the watchOS pairing range saved on this iPhone.\n\n"
