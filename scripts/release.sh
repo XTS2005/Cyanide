@@ -12,11 +12,6 @@
 #   BUMP=none  ./scripts/release.sh "..."               # leave MARKETING_VERSION as-is
 #   VERSION=1.5.3 ./scripts/release.sh "..."            # set an explicit version
 #   TAG=v1.2.3 ./scripts/release.sh "..."               # override tag (defaults to v${VERSION})
-#   SIGNAL_RELEASE_NOTIFY=0 ./scripts/release.sh "..."  # skip Signal group post
-#   # Signal posts default to jf-mac-mini@jf-mac-mini.local over SSH.
-#   SIGNAL_BOT_SSH_HOST=user@host ./scripts/release.sh "..."  # post via remote Signal bot
-#   SIGNAL_BOT_REMOTE_ENV='~/Bots/signal-bot/.env' ./scripts/release.sh "..."  # remote bot config
-#   SIGNAL_BOT_SSH_HOST= SIGNAL_BOT_DIR=/path/to/signal-bot ./scripts/release.sh "..."  # legacy local bot
 #
 # The release script owns versioning end-to-end: it edits MARKETING_VERSION and
 # CURRENT_PROJECT_VERSION in the xcodeproj, commits the bump (along with any
@@ -33,62 +28,6 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
-
-notify_signal_release() {
-    local version="$1"
-    local tag="$2"
-    local release_url="$3"
-    local notes="$4"
-    local notify_script="scripts/signal_release_notify.py"
-    local signal_ssh_host="${SIGNAL_BOT_SSH_HOST-jf-mac-mini@jf-mac-mini.local}"
-    local signal_bot_dir="${SIGNAL_BOT_DIR:-/Users/johnnyfranks/Downloads/signal-bot}"
-    local signal_env="${SIGNAL_BOT_ENV:-$signal_bot_dir/.env}"
-    local signal_remote_env="${SIGNAL_BOT_REMOTE_ENV:-~/Bots/signal-bot/.env}"
-
-    if [ "${SIGNAL_RELEASE_NOTIFY:-1}" = "0" ]; then
-        echo "==> Signal release notification disabled"
-        return 0
-    fi
-
-    if [ ! -f "$notify_script" ]; then
-        echo "warning: Signal notify skipped: $notify_script not found" >&2
-        return 0
-    fi
-
-    if [ -n "$signal_ssh_host" ]; then
-        local quoted_env quoted_version quoted_tag quoted_url quoted_notes quoted_dry_run remote_cmd
-        printf -v quoted_env "%q" "$signal_remote_env"
-        printf -v quoted_version "%q" "$version"
-        printf -v quoted_tag "%q" "$tag"
-        printf -v quoted_url "%q" "$release_url"
-        printf -v quoted_notes "%q" "$notes"
-        printf -v quoted_dry_run "%q" "${SIGNAL_RELEASE_NOTIFY_DRY_RUN:-0}"
-        remote_cmd="SIGNAL_BOT_ENV=$quoted_env CYANIDE_VERSION=$quoted_version CYANIDE_TAG=$quoted_tag CYANIDE_RELEASE_URL=$quoted_url CYANIDE_RELEASE_NOTES=$quoted_notes SIGNAL_RELEASE_NOTIFY_DRY_RUN=$quoted_dry_run python3 -"
-
-        # Non-fatal: releases should still ship if the always-on Signal bot is
-        # offline, off-network, or not yet configured for SSH.
-        local ssh_opts
-        if [ -n "${SIGNAL_BOT_SSH_OPTIONS:-}" ]; then
-            # shellcheck disable=SC2206
-            ssh_opts=(${SIGNAL_BOT_SSH_OPTIONS})
-        else
-            ssh_opts=(-o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=accept-new)
-        fi
-        if ssh "${ssh_opts[@]}" "$signal_ssh_host" "$remote_cmd" < "$notify_script"; then
-            return 0
-        fi
-        echo "warning: Signal notify skipped: SSH to $signal_ssh_host failed" >&2
-        return 0
-    fi
-
-    SIGNAL_BOT_ENV="$signal_env" \
-    CYANIDE_VERSION="$version" \
-    CYANIDE_TAG="$tag" \
-    CYANIDE_RELEASE_URL="$release_url" \
-    CYANIDE_RELEASE_NOTES="$notes" \
-    SIGNAL_RELEASE_NOTIFY_DRY_RUN="${SIGNAL_RELEASE_NOTIFY_DRY_RUN:-0}" \
-    python3 "$notify_script"
-}
 
 if ! command -v gh >/dev/null; then
     echo "error: gh CLI not installed (brew install gh)" >&2
@@ -649,9 +588,6 @@ else
         --title "$RELEASE_TITLE" \
         --notes "$NOTES"
 fi
-
-RELEASE_URL="https://github.com/${REPO_SLUG}/releases/tag/${TAG}"
-notify_signal_release "$VERSION" "$TAG" "$RELEASE_URL" "$NOTES"
 
 echo "==> done"
 gh release view "$TAG" --repo "$REPO_SLUG" | head -10

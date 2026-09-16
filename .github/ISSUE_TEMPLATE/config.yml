@@ -1,8 +1,5 @@
 blank_issues_enabled: false
 contact_links:
-  - name: Cyanide Signal Group
-    url: https://t.co/afPR3U04G1
-    about: Ask setup questions, get support, share test notes, or discuss rough feature ideas.
   - name: Latest Release
     url: https://github.com/zeroxjf/cyanide/releases/latest
     about: Install the newest IPA before reporting a bug.

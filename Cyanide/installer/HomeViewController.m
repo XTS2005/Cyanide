@@ -8,7 +8,6 @@
 #import "../SettingsViewController.h"
 #import "../tweaks/RepoTweaks.h"
 
-static NSString * const kSignalGroupURL  = @"https://signal.group/#CjQKIP0pxjc9V52ddCNk--04DosuoQl-vVOsznJfQ4GwlrlxEhCveFhBS8YdNcILpUFt7IqC";
 static NSString * const kGitHubIssuesURL = @"https://github.com/kolbicz/cyanide/issues";
 static NSString * const kGitHubRepoURL   = @"https://github.com/kolbicz/cyanide";
 
@@ -369,8 +368,6 @@ static const CGFloat kMargin = 20.0;
     ]];
     [s addArrangedSubview:headerWrap];
 
-    [s addArrangedSubview:[self linkCell:@"Signal Group" icon:@"bubble.left.and.bubble.right.fill"
-                                  color:UIColor.systemBlueColor url:kSignalGroupURL sep:YES]];
     [s addArrangedSubview:[self linkCell:@"Report a Bug" icon:@"exclamationmark.bubble.fill"
                                   color:UIColor.systemRedColor url:kGitHubIssuesURL sep:YES]];
     [s addArrangedSubview:[self linkCell:@"GitHub" icon:@"chevron.left.forwardslash.chevron.right"
