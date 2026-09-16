@@ -1021,7 +1021,7 @@ static bool gl_build_group_ios26_per_icon(uint64_t groups,
 {
     enum { ICON_CAP = 256 };
     uint64_t iconViews[ICON_CAP] = {0};
-    int iconCount = sb_collect_views(listView, iconViewCls, iconViews, ICON_CAP);
+    int iconCount = sb_collect_views_main(listView, iconViewCls, iconViews, ICON_CAP);
     if (iconCount <= 0) return false;
 
     uint64_t icons = gl_new_remote("NSMutableArray");
@@ -1540,13 +1540,13 @@ bool gravitylite_apply_in_session(GravityLiteConfig config)
         }
 
         uint64_t listViews[LV_CAP] = {0};
-        int count = sb_collect_views_in_windows(listViewCls, listViews, LV_CAP);
+        int count = sb_collect_views_in_windows_main(listViewCls, listViews, LV_CAP);
         if (count <= 0) {
             uint64_t rootFC = gl_safe_msg(mgr, "rootFolderController", 0, 0, 0, 0);
             if (!r_is_objc_ptr(rootFC)) rootFC = gl_safe_msg(mgr, "_rootFolderController", 0, 0, 0, 0);
             uint64_t rootView = gl_safe_msg(rootFC, "rootFolderView", 0, 0, 0, 0);
             if (r_is_objc_ptr(rootView)) {
-                count = sb_collect_views(rootView, listViewCls, listViews, LV_CAP);
+                count = sb_collect_views_main(rootView, listViewCls, listViews, LV_CAP);
             }
         }
 
