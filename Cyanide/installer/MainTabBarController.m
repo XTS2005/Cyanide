@@ -9,6 +9,7 @@
 #import "PackageQueue.h"
 #import "HomeViewController.h"
 #import "SourcesViewController.h"
+#import "CYIconBadge.h"
 #import "../SettingsViewController.h"
 #import "../tweaks/RepoTweaks.h"
 
@@ -85,7 +86,8 @@ static NSString * const kSourcesLastRefreshKey = @"RepoTweaksLastRefreshTimestam
     }
     if (!hasHome) {
         HomeViewController *home = [[HomeViewController alloc] init];
-        UINavigationController *homeNav = [[UINavigationController alloc] initWithRootViewController:home];
+        UINavigationController *homeNav = [[UINavigationController alloc] initWithNavigationBarClass:CYNavigationBar.class toolbarClass:nil];
+        [homeNav setViewControllers:@[home]];
         homeNav.navigationBar.barStyle = UIBarStyleBlack;
         homeNav.tabBarItem = [[UITabBarItem alloc] initWithTitle:@"Home"
                                                            image:[UIImage systemImageNamed:@"house.fill"]
@@ -100,7 +102,8 @@ static NSString * const kSourcesLastRefreshKey = @"RepoTweaksLastRefreshTimestam
     }
     if (!hasSources) {
         SourcesViewController *sources = [[SourcesViewController alloc] initWithStyle:UITableViewStyleInsetGrouped];
-        UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:sources];
+        UINavigationController *nav = [[UINavigationController alloc] initWithNavigationBarClass:CYNavigationBar.class toolbarClass:nil];
+        [nav setViewControllers:@[sources]];
         nav.navigationBar.barStyle = UIBarStyleBlack;
         nav.tabBarItem = [[UITabBarItem alloc] initWithTitle:@"Sources"
                                                        image:[UIImage systemImageNamed:@"tray.and.arrow.down.fill"]

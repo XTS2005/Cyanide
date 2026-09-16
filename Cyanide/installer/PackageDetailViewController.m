@@ -496,6 +496,11 @@ typedef NS_ENUM(NSInteger, PackageDetailSection) {
 {
     [super viewDidLoad];
     self.title = self.package.name;
+    // The tweak name is shown prominently (centered) in the table header below,
+    // so suppress the large nav title here — otherwise it duplicates the name
+    // and hangs to the far left of the inset-grouped cards. This gives the
+    // standard "detail page" look (small centered nav title, big content title).
+    self.navigationItem.largeTitleDisplayMode = UINavigationItemLargeTitleDisplayModeNever;
     self.tableView.tableHeaderView = [self buildHeaderView];
     [self updateActionButton];
 
