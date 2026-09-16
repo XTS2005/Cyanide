@@ -3138,14 +3138,23 @@ void settings_detach_krw_for_background(void)
     }
 }
 
-// Re-make the KRW socket fds from launchd on foreground. On failure the primitive
-// is cleared, so the next Run cleanly re-exploits (no worse than before).
+// Deliberately does NOT pull the fds back on wake any more.
+//
+// It used to reattach eagerly, because the wake re-apply (StatBar and friends)
+// needed live fds. krw_lock_for_access() now re-makes them on the next kernel
+// access instead, so the eager version only put the primitive back in the
+// app's hands for no reason -- and that is where it dies. 20260916-134338 is
+// the whole story in one log: handed to launchd at 13:43:44, survived the
+// screen sleeping at 13:43:46, then reattached on wake at 13:46:11 with
+// nothing asking for it, and was dead by 13:50:31. The next Run re-exploited.
+//
+// Leaving it detached costs one bootstrap_look_up on the next access and keeps
+// the primitive where it demonstrably survives.
 void settings_reattach_krw_for_foreground(void)
 {
     if (!kexploit_krw_sockets_detached()) return;
-    bool ok = krw_persistence_reattach_for_foreground();
-    printf("[SETTINGS] foreground: KRW reattach %s\n",
-           ok ? "ok" : "FAILED — next Run will re-exploit");
+    printf("[SETTINGS] foreground: KRW left resting in launchd; "
+           "next kernel access re-makes the fds\n");
 }
 
 void settings_destroy_springboard_remote_call_sync(void)
