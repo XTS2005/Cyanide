@@ -880,6 +880,8 @@ NSString * const kSettingsDSZeroWakeAnimation = @"DSZeroWakeAnimation";
 NSString * const kSettingsDSZeroBacklightFade = @"DSZeroBacklightFade";
 NSString * const kSettingsDSDoubleTapToLock   = @"DSDoubleTapToLock";
 
+NSString * const kSettingsLockDurationValue   = @"LockDurationValue";
+
 NSString * const kSettingsDSDragCoefficientEnabled = @"DSDragCoefficientEnabled";
 NSString * const kSettingsDSDragCoefficientValue   = @"DSDragCoefficientValue";
 
@@ -927,6 +929,23 @@ static double settings_drag_coefficient_value(NSUserDefaults *d)
 
     NSDictionary *bounds = @{ @"min": @0.01, @"max": @2.0, @"step": @0.01, @"precision": @2 };
     return settings_number_row_normalized_value(bounds, value);
+}
+
+// Lock Screen Duration: seconds the lock screen stays awake before it dims and
+// sleeps. Clamped to a sane range; defaults to 60s.
+static const NSInteger kSettingsLockDurationMin     = 5;
+static const NSInteger kSettingsLockDurationMax     = 3600;
+static const NSInteger kSettingsLockDurationDefault = 60;
+
+static long long settings_lock_duration_value(NSUserDefaults *d)
+{
+    id raw = [d objectForKey:kSettingsLockDurationValue];
+    NSInteger value = [raw respondsToSelector:@selector(integerValue)]
+        ? [raw integerValue]
+        : kSettingsLockDurationDefault;
+    if (value < kSettingsLockDurationMin) value = kSettingsLockDurationMin;
+    if (value > kSettingsLockDurationMax) value = kSettingsLockDurationMax;
+    return (long long)value;
 }
 
 static double settings_number_row_current_value(NSDictionary *row, NSUserDefaults *d)
@@ -3621,6 +3640,69 @@ static SettingsDarkTweaksResult settings_apply_dark_tweaks_from_defaults_locked(
     return result;
 }
 
+// Manual apply for Lock Screen Duration (structured like the OTA disabler):
+// opens a SpringBoard RemoteCall session, writes the SBMinimumLockscreenIdleTime
+// preference, and leaves the rest to the respring the caller offers. Passing 0
+// removes the floor. Takes effect on the next respring and persists.
+static bool settings_apply_lock_screen_duration_body(long long seconds)
+{
+    if (!settings_ensure_kexploit()) {
+        printf("[LSD] kernel primitives were not acquired\n");
+        log_user("[LSD] Failed: kernel primitives were not acquired. Run the chain first.\n");
+        return false;
+    }
+    bool ok = false;
+    @synchronized (settings_rc_lock()) {
+        if (!settings_ensure_springboard_remote_call_locked()) {
+            printf("[LSD] could not open SpringBoard channel\n");
+        } else {
+            ok = darksword_tweak_extend_lockscreen_duration_in_session(seconds);
+        }
+    }
+    settings_notify_package_queue_changed_async();
+    return ok;
+}
+
+static BOOL settings_apply_lock_screen_duration(long long seconds)
+{
+    if (__sync_lock_test_and_set(&g_settings_actions_running, 1)) {
+        printf("[LSD] actions already running; ignoring request\n");
+        log_user("[LSD] Another action is already running.\n");
+        return NO;
+    }
+    @try {
+        return settings_apply_lock_screen_duration_body(seconds);
+    } @finally {
+        __sync_lock_release(&g_settings_actions_running);
+    }
+}
+
+// Reads the configured Lock Screen Duration floor from inside SpringBoard.
+// Returns seconds (>0), 0 when stock/unset, or a negative sentinel:
+//   -3 = another action is running, -2 = no kernel access, -1 = channel/read error.
+static long long settings_read_lock_screen_duration(void)
+{
+    if (__sync_lock_test_and_set(&g_settings_actions_running, 1)) {
+        printf("[LSD] actions already running; ignoring read request\n");
+        return -3;
+    }
+    @try {
+        if (!settings_ensure_kexploit()) {
+            printf("[LSD] read: kernel primitives were not acquired\n");
+            return -2;
+        }
+        @synchronized (settings_rc_lock()) {
+            if (!settings_ensure_springboard_remote_call_locked()) {
+                printf("[LSD] read: could not open SpringBoard channel\n");
+                return -1;
+            }
+            return darksword_tweak_read_lockscreen_duration_in_session();
+        }
+    } @finally {
+        __sync_lock_release(&g_settings_actions_running);
+    }
+}
+
 static bool settings_apply_layout_extras_from_defaults_locked(NSUserDefaults *d)
 {
     if (![d boolForKey:kSettingsLayoutExtrasEnabled]) return false;
@@ -4036,6 +4118,26 @@ BOOL settings_apply_ota_disabled(BOOL disable)
     }
     @try {
         return settings_apply_ota_disabled_body(disable);
+    } @finally {
+        __sync_lock_release(&g_settings_actions_running);
+    }
+}
+
+// Reads current OTA state. Returns 0/1/2 (see darksword_ota_read_disabled) or a
+// negative sentinel: -3 = another action running, -2 = no kernel access,
+// -1 = filesystem access denied / read failed.
+static int settings_read_ota_status(void)
+{
+    if (__sync_lock_test_and_set(&g_settings_actions_running, 1)) {
+        printf("[SETTINGS] actions already running; ignoring OTA status read\n");
+        return -3;
+    }
+    @try {
+        if (!settings_ensure_kexploit()) {
+            printf("[OTA] status read: kernel primitives were not acquired\n");
+            return -2;
+        }
+        return darksword_ota_read_disabled();
     } @finally {
         __sync_lock_release(&g_settings_actions_running);
     }
@@ -6301,6 +6403,8 @@ void settings_register_defaults(void)
         kSettingsDSZeroBacklightFade: @NO,
         kSettingsDSDoubleTapToLock:   @NO,
 
+        kSettingsLockDurationValue:   @(kSettingsLockDurationDefault),
+
         kSettingsDSDragCoefficientEnabled: @NO,
         kSettingsDSDragCoefficientValue:   @0.5,
 
@@ -7661,13 +7765,13 @@ static _CyanideMailDelegate *_cyanide_mail_delegate(void) {
     }
 }
 
-- (void)navRespringTapped
+- (void)presentRespringPromptWithTitle:(NSString *)title message:(NSString *)message
 {
     UIAlertController *ac = [UIAlertController
-        alertControllerWithTitle:@"Respring?"
-                         message:@"SpringBoard will restart. Any unsaved live state will be reset."
+        alertControllerWithTitle:title
+                         message:message
                   preferredStyle:UIAlertControllerStyleAlert];
-    [ac addAction:[UIAlertAction actionWithTitle:@"Cancel"
+    [ac addAction:[UIAlertAction actionWithTitle:@"Later"
                                            style:UIAlertActionStyleCancel
                                          handler:nil]];
     __weak typeof(self) weakSelf = self;
@@ -7676,7 +7780,7 @@ static _CyanideMailDelegate *_cyanide_mail_delegate(void) {
                                          handler:^(UIAlertAction *_) {
         dispatch_async(dispatch_get_global_queue(0, 0), ^{
             if (__sync_lock_test_and_set(&g_settings_actions_running, 1)) {
-                printf("[SETTINGS] nav respring blocked: actions already running\n");
+                printf("[SETTINGS] respring blocked: actions already running\n");
                 return;
             }
             __sync_lock_test_and_set(&g_settings_respring_cleanup_running, 1);
@@ -7696,6 +7800,94 @@ static _CyanideMailDelegate *_cyanide_mail_delegate(void) {
         });
     }]];
     settings_present_controller(ac, self);
+}
+
+- (void)navRespringTapped
+{
+    [self presentRespringPromptWithTitle:@"Respring?"
+                                 message:@"SpringBoard will restart. Any unsaved live state will be reset."];
+}
+
+- (void)runLockScreenDurationApply:(BOOL)remove
+{
+    NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+    long long seconds = remove ? 0 : settings_lock_duration_value(d);
+    __weak typeof(self) weakSelf = self;
+    dispatch_async(dispatch_get_global_queue(0, 0), ^{
+        log_user("[LSD] %s lock screen duration%s.\n",
+                 remove ? "Removing" : "Applying",
+                 remove ? "" : "");
+        BOOL ok = settings_apply_lock_screen_duration(seconds);
+        printf("[SETTINGS] lock duration %s result=%d value=%lld\n",
+               remove ? "remove" : "apply", ok, seconds);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            __strong typeof(weakSelf) strongSelf = weakSelf;
+            if (!strongSelf) return;
+            if (!ok) {
+                UIAlertController *err = [UIAlertController
+                    alertControllerWithTitle:@"Lock Screen Duration"
+                                     message:@"Could not write the setting. Run the chain first, then try again."
+                              preferredStyle:UIAlertControllerStyleAlert];
+                [err addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+                settings_present_controller(err, strongSelf);
+                return;
+            }
+            NSString *msg = remove
+                ? @"Lock screen duration cleared. Respring now to apply?"
+                : [NSString stringWithFormat:@"Lock screen will stay awake for %lld seconds. Respring now to apply?", seconds];
+            [strongSelf presentRespringPromptWithTitle:@"Applied" message:msg];
+        });
+    });
+}
+
+- (void)runLockScreenDurationRead
+{
+    __weak typeof(self) weakSelf = self;
+    dispatch_async(dispatch_get_global_queue(0, 0), ^{
+        long long v = settings_read_lock_screen_duration();
+        dispatch_async(dispatch_get_main_queue(), ^{
+            __strong typeof(weakSelf) strongSelf = weakSelf;
+            if (!strongSelf) return;
+            NSString *msg;
+            if (v == -3)      msg = @"Another action is running. Try again in a moment.";
+            else if (v == -2) msg = @"Kernel access isn't active. Run the chain first, then try again.";
+            else if (v < 0)   msg = @"Could not read the value — the SpringBoard channel wasn't available.";
+            else if (v == 0)  msg = @"No floor is set — the lock screen uses stock timing.";
+            else              msg = [NSString stringWithFormat:
+                @"Configured floor: %lld seconds.\n\nThis is the value written to SpringBoard (SBMinimumLockscreenIdleTime). It takes effect after a respring.", v];
+            UIAlertController *ac = [UIAlertController
+                alertControllerWithTitle:@"Lock Screen Duration"
+                                 message:msg
+                          preferredStyle:UIAlertControllerStyleAlert];
+            [ac addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+            settings_present_controller(ac, strongSelf);
+        });
+    });
+}
+
+- (void)runOTAStatusRead
+{
+    __weak typeof(self) weakSelf = self;
+    dispatch_async(dispatch_get_global_queue(0, 0), ^{
+        int st = settings_read_ota_status();
+        dispatch_async(dispatch_get_main_queue(), ^{
+            __strong typeof(weakSelf) strongSelf = weakSelf;
+            if (!strongSelf) return;
+            NSString *msg;
+            if (st == -3)      msg = @"Another action is running. Try again in a moment.";
+            else if (st == -2) msg = @"Kernel access isn't active. Run the chain first, then try again.";
+            else if (st < 0)   msg = @"Could not read OTA status — filesystem access was denied.";
+            else if (st == 0)  msg = @"OTA updates are ENABLED (stock). The update daemons are not blocked.";
+            else if (st == 1)  msg = @"OTA updates are DISABLED. All update daemons are blocked in launchd.";
+            else               msg = @"OTA updates are PARTIALLY disabled — some update daemons are blocked but not all. Tap “Disable OTA Updates” to finish.";
+            UIAlertController *ac = [UIAlertController
+                alertControllerWithTitle:@"OTA Updates"
+                                 message:msg
+                          preferredStyle:UIAlertControllerStyleAlert];
+            [ac addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+            settings_present_controller(ac, strongSelf);
+        });
+    });
 }
 
 - (void)cleanupStateDidChange:(NSNotification *)note
@@ -7938,6 +8130,7 @@ static _CyanideMailDelegate *_cyanide_mail_delegate(void) {
     return @[
         @{ @"kind": @"button", @"title": @"Disable OTA Updates" },
         @{ @"kind": @"button", @"title": @"Enable OTA Updates" },
+        @{ @"kind": @"button", @"title": @"Read Current Status" },
     ];
 }
 
@@ -7998,6 +8191,29 @@ static _CyanideMailDelegate *_cyanide_mail_delegate(void) {
 - (NSArray<NSDictionary *> *)darkSwordTweakRows
 {
     return @[];
+}
+
+- (NSArray<NSDictionary *> *)lockScreenDurationRows
+{
+    return @[
+        @{ @"kind": @"number",
+           @"key": kSettingsLockDurationValue,
+           @"title": @"Duration",
+           @"subtitle": @"Seconds the lock screen stays awake before it dims and sleeps, while you read notifications. Separate from Settings > Auto-Lock. Default 60, min 5, max 3600. Face ID gaze can keep it on longer.",
+           @"min": @(kSettingsLockDurationMin),
+           @"max": @(kSettingsLockDurationMax),
+           @"step": @1, @"unit": @"s",
+           @"default": @(kSettingsLockDurationDefault) },
+        @{ @"kind": @"button", @"action": @"lockdur-apply",
+           @"title": @"Apply Lock Screen Duration",
+           @"subtitle": @"Writes the value and offers a respring to apply it." },
+        @{ @"kind": @"button", @"action": @"lockdur-remove",
+           @"title": @"Remove (restore stock)",
+           @"subtitle": @"Clears the floor; offers a respring to apply." },
+        @{ @"kind": @"button", @"action": @"lockdur-read",
+           @"title": @"Read Current Value",
+           @"subtitle": @"Shows the floor currently written in SpringBoard." },
+    ];
 }
 
 - (NSArray<NSDictionary *> *)dragCoefficientRows
@@ -8393,6 +8609,9 @@ static _CyanideMailDelegate *_cyanide_mail_delegate(void) {
     } else if (section == SectionDragCoefficient) {
         double v = settings_drag_coefficient_value(d);
         [out addObject:@{@"title": @"Coefficient", @"value": [NSString stringWithFormat:@"%.2f", v]}];
+    } else if (section == SectionLockScreenDuration) {
+        [out addObject:@{@"title": @"Duration",
+                         @"value": [NSString stringWithFormat:@"%llds", settings_lock_duration_value(d)]}];
     } else if (section == SectionNanoRegistry) {
         [out addObject:@{@"title": @"watchOS limit",      @"value": [@([d integerForKey:kSettingsNanoMaxPairing])       stringValue]}];
         [out addObject:@{@"title": @"Setup floor",        @"value": [@([d integerForKey:kSettingsNanoMinPairing])       stringValue]}];
@@ -8425,6 +8644,7 @@ static _CyanideMailDelegate *_cyanide_mail_delegate(void) {
         case SectionDarkSwordTweaks: return self.darkSwordTweakRows;
         case SectionDragCoefficient: return self.dragCoefficientRows;
         case SectionLayoutExtras: return self.layoutExtrasRows;
+        case SectionLockScreenDuration: return self.lockScreenDurationRows;
         case SectionOTA:       return self.otaRows;
         case SectionNanoRegistry: return self.nanoRegistryRows;
         case SectionThemer:  return self.themerRows;
@@ -8471,9 +8691,9 @@ static _CyanideMailDelegate *_cyanide_mail_delegate(void) {
         @{ @"title": @"QuickLoader",        @"icon": @"bolt.fill",                           @"color": [UIColor systemYellowColor], @"section": @(SectionQuickLoader) },
         @{ @"title": @"RepoTweaks",         @"icon": @"tray.and.arrow.down.fill",            @"color": [UIColor systemBlueColor],   @"section": @(SectionRepoTweaks) },
         @{ @"title": @"Powercuff",          @"icon": @"bolt.slash.fill",                     @"color": [UIColor systemOrangeColor], @"section": @(SectionPowercuff) },
-        @{ @"title": @"SpringBoard Tweaks", @"icon": @"apps.iphone",                         @"color": [UIColor systemIndigoColor], @"section": @(SectionDarkSwordTweaks) },
         @{ @"title": @"Drag Coefficient",   @"icon": @"dial.medium.fill",                    @"color": [UIColor systemIndigoColor], @"section": @(SectionDragCoefficient) },
         @{ @"title": @"Home Layout Extras", @"icon": @"square.dashed.inset.filled",          @"color": [UIColor systemPurpleColor], @"section": @(SectionLayoutExtras) },
+        @{ @"title": @"Lock Screen Duration", @"icon": @"lock.rectangle.on.rectangle",       @"color": [UIColor systemIndigoColor], @"section": @(SectionLockScreenDuration) },
     ];
 }
 
@@ -8603,6 +8823,9 @@ static _CyanideMailDelegate *_cyanide_mail_delegate(void) {
     }
     if (s == SectionDragCoefficient) {
         return @"Overrides _UIAnimationDragCoefficient in SpringBoard. Type the raw coefficient: 1.00 = stock, 0.50 = 2× faster, 0.25 = 4× faster, minimum 0.01. Imported from kolbicz/DarkSword-Tweaks.";
+    }
+    if (s == SectionLockScreenDuration) {
+        return @"Extends the lock screen's own dim-then-sleep timer (separate from Settings > Auto-Lock) so you get more time to read notifications. Type the exact seconds, then tap Apply — it writes the SpringBoard preference SBMinimumLockscreenIdleTime (a global floor) and offers a respring to apply it. Like OTA Updates it is a manual action; the value persists across respring and reboot. Tap Remove to restore stock. Run the chain at least once first so kernel access is active.";
     }
     if (s == SectionLayoutExtras) {
         NSInteger major = [[NSProcessInfo processInfo] operatingSystemVersion].majorVersion;
@@ -11958,8 +12181,32 @@ void cyanide_present_contact(UIViewController *host)
     }
 
     if (indexPath.section == SectionOTA) {
-        settings_run_ota_action(indexPath.row == 0);
+        if (indexPath.row == 2) {
+            [self runOTAStatusRead];
+        } else {
+            settings_run_ota_action(indexPath.row == 0);
+        }
         return;
+    }
+
+    if (indexPath.section == SectionLockScreenDuration) {
+        NSArray<NSDictionary *> *rows = [self rowsForSection:SectionLockScreenDuration];
+        if (indexPath.row < (NSInteger)rows.count) {
+            NSString *action = rows[indexPath.row][@"action"];
+            if ([action isEqualToString:@"lockdur-apply"]) {
+                [self runLockScreenDurationApply:NO];
+                return;
+            }
+            if ([action isEqualToString:@"lockdur-remove"]) {
+                [self runLockScreenDurationApply:YES];
+                return;
+            }
+            if ([action isEqualToString:@"lockdur-read"]) {
+                [self runLockScreenDurationRead];
+                return;
+            }
+        }
+        // The number row falls through to the generic number-entry handler.
     }
 
     if (indexPath.section == SectionNanoRegistry) {

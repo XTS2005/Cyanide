@@ -1067,6 +1067,87 @@ bool darksword_tweak_double_tap_to_lock_in_session(void)
     return ok;
 }
 
+// Extend Lock Screen Duration.
+//
+// The lock screen's dim-then-sleep floor is the SpringBoard preference
+// `SBMinimumLockscreenIdleTime` (domain com.apple.springboard), read by
+// SBIdleTimerGlobalStateMonitor; -[SBIdleTimerDescriptorFactory
+// sanitizeDescriptorForLockscreenDefaults:] then floors every lock-screen
+// interval with max(interval, minimumLockscreenIdleTime). Setting this
+// preference gives an EXACT seconds value (not the coarse idleTimerDuration
+// enum buckets) and PERSISTS across respring and reboot.
+//
+// Because this runs inside SpringBoard via RemoteCall, writing SpringBoard's own
+// defaults domain is permitted, so NSUserDefaults here IS com.apple.springboard.
+// The monitor reads the preference when it initializes, so this takes effect on
+// the next respring (confirmed on device: 30 -> exactly 30s). We do NOT poke the
+// monitor ivar (its getter is a block; overwriting it crashes SpringBoard).
+bool darksword_tweak_extend_lockscreen_duration_in_session(long long seconds)
+{
+    if (seconds < 1) seconds = 1;
+    printf("[DST:LSD] setting SBMinimumLockscreenIdleTime=%llds in com.apple.springboard\n",
+           seconds);
+
+    uint64_t NSUserDefaults = r_class("NSUserDefaults");
+    uint64_t ud = r_is_objc_ptr(NSUserDefaults)
+        ? r_msg2_main(NSUserDefaults, "standardUserDefaults", 0, 0, 0, 0) : 0;
+    if (!r_is_objc_ptr(ud)) {
+        printf("[DST:LSD] standardUserDefaults unavailable\n");
+        return false;
+    }
+
+    uint64_t key = r_cfstr("SBMinimumLockscreenIdleTime");
+    if (!key) {
+        printf("[DST:LSD] key string alloc failed\n");
+        return false;
+    }
+
+    // -[NSUserDefaults setDouble:forKey:] — signature v@:d@, so the double is a
+    // real fp argument; marshal it via the raw (NSInvocation-backed) call.
+    double val = (double)seconds;
+    r_msg2_main_raw(ud, "setDouble:forKey:", &val, sizeof(val),
+                    &key, sizeof(key), NULL, 0, NULL, 0);
+    r_msg2_main(ud, "synchronize", 0, 0, 0, 0);
+
+    // Read back for the log (integerValue returns in x0, easy to print).
+    uint64_t num = r_msg2_main(ud, "objectForKey:", key, 0, 0, 0);
+    long long got = r_is_objc_ptr(num)
+        ? (long long)r_msg2_main(num, "integerValue", 0, 0, 0, 0) : -1;
+    printf("[DST:LSD] wrote pref; readback=%lld (respring to apply; persists)\n", got);
+    return got == seconds;
+}
+
+// Read the currently-configured lock-screen floor. Because this runs inside
+// SpringBoard, NSUserDefaults here IS com.apple.springboard, so we read back
+// exactly what the write side stored. Returns the seconds value, 0 when the key
+// is unset (stock timing), or -1 on failure.
+long long darksword_tweak_read_lockscreen_duration_in_session(void)
+{
+    uint64_t NSUserDefaults = r_class("NSUserDefaults");
+    uint64_t ud = r_is_objc_ptr(NSUserDefaults)
+        ? r_msg2_main(NSUserDefaults, "standardUserDefaults", 0, 0, 0, 0) : 0;
+    if (!r_is_objc_ptr(ud)) {
+        printf("[DST:LSD] standardUserDefaults unavailable\n");
+        return -1;
+    }
+
+    uint64_t key = r_cfstr("SBMinimumLockscreenIdleTime");
+    if (!key) {
+        printf("[DST:LSD] key string alloc failed\n");
+        return -1;
+    }
+
+    uint64_t num = r_msg2_main(ud, "objectForKey:", key, 0, 0, 0);
+    if (!r_is_objc_ptr(num)) {
+        printf("[DST:LSD] SBMinimumLockscreenIdleTime not set (stock)\n");
+        return 0;
+    }
+
+    long long got = (long long)r_msg2_main(num, "integerValue", 0, 0, 0, 0);
+    printf("[DST:LSD] current SBMinimumLockscreenIdleTime=%lld\n", got);
+    return got;
+}
+
 bool darksword_tweaks_apply_in_session(bool disableAppLibrary,
                                        bool disableIconFlyIn,
                                        bool zeroWakeAnimation,

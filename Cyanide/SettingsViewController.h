@@ -35,6 +35,7 @@ typedef NS_ENUM(NSInteger, SettingsSection) {
     SectionFastLockXLite,
     SectionQuickLoader,
     SectionRepoTweaks,
+    SectionLockScreenDuration,
     SectionCount,
 };
 
@@ -74,6 +75,8 @@ extern NSString * const kSettingsDSDoubleTapToLock;
 
 extern NSString * const kSettingsDSDragCoefficientEnabled;
 extern NSString * const kSettingsDSDragCoefficientValue;
+
+extern NSString * const kSettingsLockDurationValue;
 
 extern NSString * const kSettingsLayoutExtrasEnabled;
 extern NSString * const kSettingsLayoutHomeExtraLeft;

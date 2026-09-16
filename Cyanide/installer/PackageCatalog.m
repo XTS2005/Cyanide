@@ -124,6 +124,7 @@ static const NSInteger kSecAppSwitcherGrid  = SectionAppSwitcherGrid;
 static const NSInteger kSecFastLockXLite    = SectionFastLockXLite;
 static const NSInteger kSecQuickLoader      = SectionQuickLoader;
 static const NSInteger kSecRepoTweaks       = SectionRepoTweaks;
+static const NSInteger kSecLockScreenDuration = SectionLockScreenDuration;
 
 + (NSArray<Package *> *)allPackages
 {
@@ -319,6 +320,24 @@ static const NSInteger kSecRepoTweaks       = SectionRepoTweaks;
             ];
         }
 
+        // Lock Screen Duration is a manual tool (DirectTool): it appears in the
+        // tweak list with author/version, but instead of a queued install it
+        // opens its own Settings section whose Apply / Remove / Read buttons
+        // write the SBMinimumLockscreenIdleTime floor and offer a respring. Like
+        // OTA Updates it is not part of the Run queue.
+        Package *lockScreenDuration = [[Package alloc] initWithIdentifier:@"com.darksword.lockscreen-duration"
+                                           name:@"Lock Screen Duration"
+                               shortDescription:@"Keep the lock screen awake longer"
+                                longDescription:@"Extends the lock screen's own dim-then-sleep timer — the short countdown that turns the screen off while you read notifications, separate from Settings > Auto-Lock.\n\nThis is a manual tool, not a queued package. Open Controls, set the number of seconds, then tap Apply Lock Screen Duration. It writes the SpringBoard preference SBMinimumLockscreenIdleTime (a global floor applied to every lock-screen idle state, including after Face ID) and offers a respring to apply it. The value persists across respring and reboot. Use Remove to restore stock timing, or Read Current Value to see what is configured.\n\nMechanism: -[SBIdleTimerDescriptorFactory sanitizeDescriptorForLockscreenDefaults:] floors every lock-screen interval with max(interval, minimumLockscreenIdleTime). Face ID gaze (Attention Aware) can keep the screen on even longer.\n\nRun the chain at least once first so kernel access is active. Takes effect on the next respring."
+                                        version:@"1.0"
+                                         author:@"kolbicz"
+                                       category:@"SpringBoard"
+                                     symbolName:@"lock.rectangle.on.rectangle"
+                                           kind:PackageInstallKindDirectTool
+                                     enabledKey:nil
+                                          isNew:YES];
+        lockScreenDuration.settingsSection = kSecLockScreenDuration;
+
         Package *gravityLite = [[Package alloc] initWithIdentifier:@"com.darksword.gravitylite"
                                            name:@"Gravity Lite"
                                shortDescription:@"Make home-screen icons fall with physics"
@@ -427,8 +446,8 @@ static const NSInteger kSecRepoTweaks       = SectionRepoTweaks;
         Package *otaBlock = [[Package alloc] initWithIdentifier:@"com.darksword.ota-block"
                                            name:@"OTA Updates"
                                shortDescription:@"Enable or disable over-the-air system updates"
-                                longDescription:@"Disables or enables the launchd jobs responsible for over-the-air system updates by editing disabled.plist. State persists across reboots.\n\nSystem-file warning: this edits /private/var/db/com.apple.xpc.launchd/disabled.plist. Incorrect or partial writes can affect launchd job state across boot. You disable or re-enable OTA updates at your own risk.\n\nNo Run/Apply step required for this package. Use Disable to block OTA updates, or Enable to restore them."
-                                        version:version
+                                longDescription:@"Disables or enables the launchd jobs responsible for over-the-air system updates by editing disabled.plist. State persists across reboots.\n\nSystem-file warning: this edits /private/var/db/com.apple.xpc.launchd/disabled.plist. Incorrect or partial writes can affect launchd job state across boot. You disable or re-enable OTA updates at your own risk.\n\nNo Run/Apply step required for this package. Use Disable to block OTA updates, or Enable to restore them. Read Current Status reports whether the update daemons are currently blocked.\n\nVersion 1.1 adds a Read Current Status control."
+                                        version:@"1.1"
                                          author:@"kolbicz"
                                        category:@"System"
                                      symbolName:@"icloud.slash.fill"
@@ -525,6 +544,7 @@ static const NSInteger kSecRepoTweaks       = SectionRepoTweaks;
             }),
 
             otaBlock,
+            lockScreenDuration,
 
             // Higher-risk/manual packages last so their warnings sit below core tweaks.
 #if CYANIDE_EXPERIMENTAL_TWEAKS_AVAILABLE

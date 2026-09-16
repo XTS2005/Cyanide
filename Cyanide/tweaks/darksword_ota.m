@@ -561,21 +561,8 @@ static bool ota_prepare_local_root_rw(void)
     return false;
 }
 
-static bool ota_set_local_with_launchd_krw(bool disabled)
+static int ota_apply_labels(NSMutableDictionary *plist, bool disabled)
 {
-    printf("[OTA] live KRW active; %s OTA without launchd RemoteCall\n",
-           disabled ? "disabling" : "enabling");
-
-    if (!ota_prepare_local_root_rw()) {
-        printf("[OTA] unable to get local /private/var rw access\n");
-        return false;
-    }
-
-    NSString *dirPath = @(kOTAPlistDirPath);
-    NSString *plistPath = [dirPath stringByAppendingPathComponent:@(kOTAPlistFileName)];
-    NSString *tempPath = [dirPath stringByAppendingPathComponent:@(kOTAPlistTempFileName)];
-    NSMutableDictionary *plist = ota_read_disabled_plist(plistPath);
-
     int changed = 0;
     for (NSString *label in ota_daemon_labels()) {
         if (disabled) {
@@ -596,6 +583,25 @@ static bool ota_set_local_with_launchd_krw(bool disabled)
             }
         }
     }
+    return changed;
+}
+
+static bool ota_set_local_with_launchd_krw(bool disabled)
+{
+    printf("[OTA] live KRW active; %s OTA without launchd RemoteCall\n",
+           disabled ? "disabling" : "enabling");
+
+    if (!ota_prepare_local_root_rw()) {
+        printf("[OTA] unable to get local /private/var rw access\n");
+        return false;
+    }
+
+    NSString *dirPath = @(kOTAPlistDirPath);
+    NSString *plistPath = [dirPath stringByAppendingPathComponent:@(kOTAPlistFileName)];
+    NSString *tempPath = [dirPath stringByAppendingPathComponent:@(kOTAPlistTempFileName)];
+    NSMutableDictionary *plist = ota_read_disabled_plist(plistPath);
+
+    int changed = ota_apply_labels(plist, disabled);
 
     if (changed == 0) {
         printf("[OTA] no plist changes needed\n");
@@ -605,158 +611,27 @@ static bool ota_set_local_with_launchd_krw(bool disabled)
     return ota_write_disabled_plist(plist, plistPath, tempPath, dirPath);
 }
 
-static bool ota_disable_original_remote_call(void)
+int darksword_ota_read_disabled(void)
 {
-    printf("[ota] === DISABLING OTA ===\n");
-
-    if (init_remote_call("launchd", false) != 0) {
-        printf("[ota] failed to init remote call\n");
-        return false;
+    if (!kexploit_krw_ready()) {
+        printf("[OTA] refusing status read: KRW is not active/recovered\n");
+        return -1;
+    }
+    if (!ota_prepare_local_root_rw()) {
+        printf("[OTA] status read: no /private/var read access\n");
+        return -1;
     }
 
-    bool ok = false;
-    uint64_t fileBuf = do_remote_call_stable(1000, "mmap",
-                                             0,
-                                             kOTABufferSize,
-                                             VM_PROT_READ | VM_PROT_WRITE,
-                                             MAP_PRIVATE | MAP_ANON,
-                                             (uint64_t)-1,
-                                             0,
-                                             0,
-                                             0);
-    if (!fileBuf) {
-        printf("[ota] mmap failed\n");
-        destroy_remote_call();
-        return false;
+    NSMutableDictionary *plist = ota_read_disabled_plist(@(kOTAOriginalPlistPath));
+    int total = 0, blocked = 0;
+    for (NSString *label in ota_daemon_labels()) {
+        total++;
+        if ([plist[label] boolValue]) blocked++;
     }
-
-    uint64_t scratchRemote = remote_call_trojan_mem();
-    if (!scratchRemote) {
-        printf("[ota] scratch remote memory unavailable\n");
-        do_remote_call_stable(1000, "munmap", fileBuf, kOTABufferSize, 0, 0, 0, 0, 0, 0);
-        destroy_remote_call();
-        return false;
-    }
-
-    if (!remote_write(scratchRemote, kOTAOriginalPlistPath, strlen(kOTAOriginalPlistPath) + 1)) {
-        printf("[ota] failed to write read path into launchd scratch\n");
-        do_remote_call_stable(1000, "munmap", fileBuf, kOTABufferSize, 0, 0, 0, 0, 0, 0);
-        destroy_remote_call();
-        return false;
-    }
-    uint64_t fd = do_remote_call_stable(1000, "open",
-                                        scratchRemote,
-                                        0,
-                                        0,
-                                        0,
-                                        0,
-                                        0,
-                                        0,
-                                        0);
-
-    NSMutableDictionary *plist = [NSMutableDictionary dictionary];
-    if ((int64_t)fd >= 0) {
-        uint64_t bytesRead = do_remote_call_stable(1000, "read",
-                                                   fd,
-                                                   fileBuf,
-                                                   kOTABufferSize,
-                                                   0,
-                                                   0,
-                                                   0,
-                                                   0,
-                                                   0);
-        do_remote_call_stable(1000, "close", fd, 0, 0, 0, 0, 0, 0, 0);
-        if ((int64_t)bytesRead > 0) {
-            uint8_t *buf = malloc((size_t)bytesRead);
-            if (buf) {
-                if (remote_read(fileBuf, buf, bytesRead)) {
-                    NSData *data = [NSData dataWithBytes:buf length:(NSUInteger)bytesRead];
-
-                    NSMutableDictionary *existing = [[NSPropertyListSerialization
-                        propertyListWithData:data
-                                     options:NSPropertyListMutableContainersAndLeaves
-                                      format:nil
-                                       error:nil] mutableCopy];
-                    if (existing) plist = existing;
-                } else {
-                    printf("[ota] failed to copy disabled.plist out of launchd\n");
-                }
-                free(buf);
-            }
-        }
-    }
-
-    int added = 0;
-    for (NSString *key in ota_daemon_labels()) {
-        if (!plist[key]) {
-            plist[key] = @YES;
-            printf("[ota] adding: %s\n", key.UTF8String);
-            added++;
-        } else {
-            printf("[ota] already present: %s\n", key.UTF8String);
-        }
-    }
-
-    if (added > 0) {
-        NSData *outData = [NSPropertyListSerialization dataWithPropertyList:plist
-                                                                     format:NSPropertyListXMLFormat_v1_0
-                                                                    options:0
-                                                                      error:nil];
-        if (outData.length > 0) {
-            if (!remote_write(fileBuf, outData.bytes, outData.length)) {
-                printf("[ota] failed to copy disabled.plist into launchd buffer\n");
-                goto finish;
-            }
-            if (!remote_write(scratchRemote, kOTAOriginalPlistPath, strlen(kOTAOriginalPlistPath) + 1)) {
-                printf("[ota] failed to write output path into launchd scratch\n");
-                goto finish;
-            }
-            uint64_t wfd = do_remote_call_stable(1000, "open",
-                                                 scratchRemote,
-                                                 (uint64_t)(O_WRONLY | O_CREAT | O_TRUNC),
-                                                 0644,
-                                                 0,
-                                                 0,
-                                                 0,
-                                                 0,
-                                                 0);
-            if ((int64_t)wfd >= 0) {
-                uint64_t totalWritten = 0;
-                uint64_t remaining = outData.length;
-                while (remaining > 0) {
-                    uint64_t written = do_remote_call_stable(1000, "write",
-                                                             wfd,
-                                                             fileBuf + totalWritten,
-                                                             remaining,
-                                                             0,
-                                                             0,
-                                                             0,
-                                                             0,
-                                                             0);
-                    if ((int64_t)written <= 0) break;
-                    totalWritten += written;
-                    remaining -= written;
-                }
-                do_remote_call_stable(1000, "close", wfd, 0, 0, 0, 0, 0, 0, 0);
-                printf("[ota] disabled.plist written (%llu bytes) — reboot to apply\n",
-                       totalWritten);
-                ok = (remaining == 0);
-            } else {
-                printf("[ota] disabled.plist write failed\n");
-            }
-        } else {
-            printf("[ota] disabled.plist serialization failed\n");
-        }
-    } else {
-        printf("[ota] all entries already present — reboot to apply if needed\n");
-        ok = true;
-    }
-
-finish:
-    do_remote_call_stable(1000, "munmap", fileBuf, kOTABufferSize, 0, 0, 0, 0, 0, 0);
-    destroy_remote_call();
-    printf("[ota] === OTA DISABLED (reboot required) ===\n");
-    return ok;
+    printf("[OTA] status read: %d/%d update daemons blocked\n", blocked, total);
+    if (blocked == 0) return 0;
+    if (blocked == total) return 1;
+    return 2;
 }
 
 bool darksword_ota_set_disabled(bool disabled)
@@ -783,10 +658,6 @@ bool darksword_ota_set_disabled(bool disabled)
         return ok;
     }
 
-    if (disabled) {
-        return ota_disable_original_remote_call();
-    }
-
     printf("[OTA] === %s OTA ===\n", disabled ? "DISABLING" : "ENABLING");
 
     OTADirRedirect redir = {0};
@@ -802,26 +673,7 @@ bool darksword_ota_set_disabled(bool disabled)
 
     do {
         NSMutableDictionary *plist = ota_read_disabled_plist(plistPath);
-        int changed = 0;
-        for (NSString *label in ota_daemon_labels()) {
-            if (disabled) {
-                if (![plist[label] boolValue]) {
-                    plist[label] = @YES;
-                    changed++;
-                    printf("[OTA] disabling %s\n", label.UTF8String);
-                } else {
-                    printf("[OTA] already disabled %s\n", label.UTF8String);
-                }
-            } else {
-                if (plist[label]) {
-                    [plist removeObjectForKey:label];
-                    changed++;
-                    printf("[OTA] enabling %s\n", label.UTF8String);
-                } else {
-                    printf("[OTA] already enabled %s\n", label.UTF8String);
-                }
-            }
-        }
+        int changed = ota_apply_labels(plist, disabled);
 
         if (changed == 0) {
             printf("[OTA] no plist changes needed\n");
