@@ -6430,14 +6430,16 @@ void settings_register_defaults(void)
 {
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
     [defaults registerDefaults:@{
-        // pe_v2 (stored as 0) is the default. Over 44 fresh chain runs on
-        // iPhone17,2 / iOS 18.5 22F76 it acquired 12/21 (57%) against pe_v1's
-        // 10/23 (43%), and panicked the device on 5/21 runs against pe_v1's
-        // 9/23 — better on both axes. The earlier note here claimed pe_v2 had
-        // never acquired on A18; the chain logs disprove that. Must be spelled
-        // out as a registered default because reinstalling a sideloaded build
-        // wipes NSUserDefaults. See kexploit_opa334.m for the full table.
-        kSettingsA18ExploitPath:     @0,
+        // pe_v1 (stored as 1) stays the default. pe_v2 looked better over 44
+        // fresh chain runs on iPhone17,2 / iOS 18.5 22F76 — 12/21 acquired
+        // against 10/23, 5/21 panics against 9/23 — but neither gap is
+        // significant (Fisher p=0.55 and p=0.34, confidence intervals almost
+        // fully overlapping), so there is no evidence to change what ships.
+        // What the logs do disprove is the old claim that pe_v2 has never
+        // acquired on A18: it did, 12 times. See kexploit_opa334.m.
+        // Must be spelled out as a registered default because reinstalling a
+        // sideloaded build wipes NSUserDefaults.
+        kSettingsA18ExploitPath:     @1,
         // Off by default: baseline bulk-spray + forward-scan is the proven pe_v1
         // path (~4/7). Interleave+reverse-scan (approach A) pins the find to the
         // mapping tail but has not measured a better panic rate, so it is opt-in.
@@ -11072,7 +11074,7 @@ void cyanide_present_contact(UIViewController *host)
         title.translatesAutoresizingMaskIntoConstraints = NO;
 
         UISegmentedControl *seg =
-            [[UISegmentedControl alloc] initWithItems:@[@"pe_v1 (fallback)", @"pe_v2 (default)"]];
+            [[UISegmentedControl alloc] initWithItems:@[@"pe_v1 (default)", @"pe_v2 (fallback)"]];
         seg.translatesAutoresizingMaskIntoConstraints = NO;
         // Display order is pe_v1 first, but the stored value is unchanged
         // (1 = pe_v1, 0 = pe_v2) so existing preferences keep their meaning.
@@ -12090,7 +12092,7 @@ void cyanide_present_contact(UIViewController *host)
     [[NSUserDefaults standardUserDefaults] synchronize];
     log_user("[KRW] A18 exploit path set to %s. Takes effect on the next fresh chain run "
              "(a parked/recovered session skips the exploit entirely).\n",
-             path == 1 ? "pe_v1 (fallback)" : "pe_v2 (default)");
+             path == 1 ? "pe_v1 (default)" : "pe_v2 (fallback)");
     // The pe_v1-only options (shaping/interleave/bounded) enable/disable with the
     // path -- reload so they grey out or come back live immediately.
     [self.tableView reloadData];
