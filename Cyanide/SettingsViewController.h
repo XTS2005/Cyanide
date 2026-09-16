@@ -170,7 +170,6 @@ BOOL settings_device_supported(void);
 // configured, else mailto: fallback) prefilled with the latest diagnostic log
 // inline. Presented from `host`.
 void cyanide_present_contact(UIViewController *host);
-BOOL settings_apply_ota_disabled(BOOL disabled);
 BOOL settings_themer_has_selected_theme(void);
 NSString *settings_themer_selected_theme_display_name(void);
 BOOL settings_snowboardlite_has_selected_theme(void);

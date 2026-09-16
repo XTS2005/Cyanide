@@ -326,16 +326,14 @@ static BOOL QueuePackageIsHideHomeBar(Package *pkg)
     NSString *label;
     switch ((QueueReviewSection)section) {
         case QueueReviewSectionInstall:
-            if (allSameKind && commonKind == PackageInstallKindOTA) label = @"Disable";
-            else if (allSameKind && commonKind == PackageInstallKindNanoRegistry) label = @"Apply";
+            if (allSameKind && commonKind == PackageInstallKindNanoRegistry) label = @"Apply";
             else if (allSameKind && commonKind == PackageInstallKindCallRecordingSound) label = @"Silence";
             else if (allSameKind && commonKind == PackageInstallKindHideHomeBar) label = @"Hide";
             else if (allSameKind && commonKind == PackageInstallKindRepoTweak) label = @"Install";
             else label = @"Activate";
             break;
         case QueueReviewSectionUninstall:
-            if (allSameKind && commonKind == PackageInstallKindOTA) label = @"Enable";
-            else if (allSameKind && commonKind == PackageInstallKindNanoRegistry) label = @"Remove";
+            if (allSameKind && commonKind == PackageInstallKindNanoRegistry) label = @"Remove";
             else if (allSameKind && commonKind == PackageInstallKindCallRecordingSound) label = @"Restore";
             else if (allSameKind && commonKind == PackageInstallKindHideHomeBar) label = @"Restore";
             else if (allSameKind && commonKind == PackageInstallKindRepoTweak) label = @"Remove";
@@ -408,10 +406,6 @@ static BOOL QueuePackageIsHideHomeBar(Package *pkg)
     switch (s) {
         case QueueReviewSectionInstall:
             switch (pkg.kind) {
-                case PackageInstallKindOTA:
-                    cell.detailTextLabel.text = @"Pending OTA disable";
-                    cell.detailTextLabel.textColor = UIColor.systemOrangeColor;
-                    break;
                 case PackageInstallKindNanoRegistry:
                     cell.detailTextLabel.text = @"Pending override apply";
                     cell.detailTextLabel.textColor = self.view.tintColor;
@@ -436,10 +430,6 @@ static BOOL QueuePackageIsHideHomeBar(Package *pkg)
             break;
         case QueueReviewSectionUninstall:
             switch (pkg.kind) {
-                case PackageInstallKindOTA:
-                    cell.detailTextLabel.text = @"Pending OTA enable";
-                    cell.detailTextLabel.textColor = UIColor.systemGreenColor;
-                    break;
                 case PackageInstallKindNanoRegistry:
                     cell.detailTextLabel.text = @"Pending override remove";
                     cell.detailTextLabel.textColor = UIColor.systemRedColor;

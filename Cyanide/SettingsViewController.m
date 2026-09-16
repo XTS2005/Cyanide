@@ -4186,7 +4186,9 @@ static bool settings_apply_ota_disabled_body(BOOL disable)
     return ok;
 }
 
-BOOL settings_apply_ota_disabled(BOOL disable)
+// File-local since the OTA package stopped committing through the install
+// queue; settings_run_ota_action() below is the only caller.
+static BOOL settings_apply_ota_disabled(BOOL disable)
 {
     if (__sync_lock_test_and_set(&g_settings_actions_running, 1)) {
         printf("[SETTINGS] actions already running; ignoring OTA request\n");

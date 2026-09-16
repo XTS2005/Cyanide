@@ -173,7 +173,6 @@ static BOOL PackageRepoScriptRequiresNativeBridge(NSString *rawScript)
             if ([self.enabledKey isEqualToString:kSettingsQuickLoaderEnabled] &&
                 quickloader_is_driven_by_repo_tweak()) return NO;
             return [d boolForKey:self.enabledKey];
-        case PackageInstallKindOTA:
         case PackageInstallKindNanoRegistry:
         case PackageInstallKindCallRecordingSound:
             // Manual-control packages: no persistent "installed" state from
@@ -235,14 +234,6 @@ static BOOL PackageRepoScriptRequiresNativeBridge(NSString *rawScript)
             if (self.enabledKey) {
                 [d setBool:installed forKey:self.enabledKey];
                 [d synchronize];
-            }
-            return;
-        case PackageInstallKindOTA:
-            if (settings_apply_ota_disabled(installed)) {
-                log_user("[INSTALLER] OTA updates %s.\n", installed ? "disabled" : "enabled");
-            } else {
-                log_user("[INSTALLER] OTA %s failed; install state was not changed.\n",
-                         installed ? "disable" : "enable");
             }
             return;
         case PackageInstallKindNanoRegistry:
