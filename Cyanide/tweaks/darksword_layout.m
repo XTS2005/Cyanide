@@ -320,27 +320,22 @@ static int rc_refresh_list_view(uint64_t listView, uint64_t clsInv,
     uint64_t clsIconView = r_class("SBIconView");
     if (!clsIconView) return 0;
 
-    // Walk the live view hierarchy on SpringBoard's main thread: doing this on
-    // the RemoteCall worker thread races SpringBoard's own layout and crashes it
-    // (EXC_ARM_PAC_FAIL). Retain the subviews snapshot across the marshaled hops.
-    uint64_t subs = r_msg_main(listView, r_sel("subviews"), 0, 0, 0, 0);
+    uint64_t subs = r_msg(listView, r_sel("subviews"), 0, 0, 0, 0);
     if (!subs) return 0;
-    r_msg_main(subs, r_sel("retain"), 0, 0, 0, 0);
-    uint64_t n = r_msg_main(subs, r_sel("count"), 0, 0, 0, 0);
+    uint64_t n = r_msg(subs, r_sel("count"), 0, 0, 0, 0);
     if (n > 512) n = 512;
 
     uint64_t selObjAt = r_sel("objectAtIndex:");
     uint64_t selKind  = r_sel("isKindOfClass:");
     int touched = 0;
     for (uint64_t i = 0; i < n; i++) {
-        uint64_t v = r_msg_main(subs, selObjAt, i, 0, 0, 0);
+        uint64_t v = r_msg(subs, selObjAt, i, 0, 0, 0);
         if (!v) continue;
-        if (!r_msg_main(v, selKind, clsIconView, 0, 0, 0)) continue;
+        if (!r_msg(v, selKind, clsIconView, 0, 0, 0)) continue;
         rc_refresh_icon_view(v, clsInv, info);
         touched++;
         usleep(10000);
     }
-    r_msg_main(subs, r_sel("release"), 0, 0, 0, 0);
     return touched;
 }
 
@@ -437,13 +432,13 @@ bool darksword_layout_home_scale_in_session(double scale)
     uint64_t clsListView = r_class("SBIconListView");
     enum { LV_CAP = 64 };
     uint64_t lvs[LV_CAP];
-    int nlv = sb_collect_views_in_windows_main(clsListView, lvs, LV_CAP);
+    int nlv = sb_collect_views_in_windows(clsListView, lvs, LV_CAP);
     if (nlv == 0) {
         uint64_t rootFC = rc_safe_msg(mgr, "rootFolderController", 0, 0, 0, 0);
         if (!rootFC) rootFC = rc_safe_msg(mgr, "_rootFolderController", 0, 0, 0, 0);
         if (rootFC) {
             uint64_t rv = rc_safe_msg(rootFC, "view", 0, 0, 0, 0);
-            if (rv) nlv = sb_collect_views_main(rv, clsListView, lvs, LV_CAP);
+            if (rv) nlv = sb_collect_views(rv, clsListView, lvs, LV_CAP);
         }
     }
     for (int i = 0; i < nlv; i++) {
@@ -480,7 +475,7 @@ bool darksword_layout_dock_scale_in_session(double scale)
         uint64_t clsListView = r_class("SBIconListView");
         enum { LV_CAP = 64 };
         uint64_t lvs[LV_CAP];
-        int nlv = sb_collect_views_in_windows_main(clsListView, lvs, LV_CAP);
+        int nlv = sb_collect_views_in_windows(clsListView, lvs, LV_CAP);
         for (int i = 0; i < nlv; i++) {
             if (rc_safe_msg(lvs[i], "isDock", 0, 0, 0, 0)) {
                 rc_refresh_list_view(lvs[i], clsInv, &info);
@@ -531,13 +526,13 @@ static bool darksword_layout_apply_in_session_ios26(double exL, double exR, doub
 
     enum { LV_CAP = 64 };
     uint64_t lvs[LV_CAP];
-    int nlv = sb_collect_views_in_windows_main(clsListView, lvs, LV_CAP);
+    int nlv = sb_collect_views_in_windows(clsListView, lvs, LV_CAP);
     if (nlv == 0 && mgr) {
         uint64_t rootFC = rc_safe_msg(mgr, "rootFolderController", 0, 0, 0, 0);
         if (!rootFC) rootFC = rc_safe_msg(mgr, "_rootFolderController", 0, 0, 0, 0);
         if (rootFC) {
             uint64_t rv = rc_safe_msg(rootFC, "view", 0, 0, 0, 0);
-            if (rv) nlv = sb_collect_views_main(rv, clsListView, lvs, LV_CAP);
+            if (rv) nlv = sb_collect_views(rv, clsListView, lvs, LV_CAP);
         }
     }
     printf("[LAYOUT26] discovered %d SBIconListView(s)\n", nlv);

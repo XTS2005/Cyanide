@@ -2003,10 +2003,7 @@ static bool axn_is_kind_of_cached_class(uint64_t obj, uint64_t cls)
     if (!r_is_objc_ptr(obj) || !r_is_objc_ptr(cls)) return false;
     uint64_t isKindSel = axn_sel_cached(AXNSelIsKindOfClass, "isKindOfClass:");
     if (!isKindSel) return false;
-    // Main thread: this runs on live notification views from the 500ms live
-    // loop; touching UIKit off the RemoteCall worker thread races SpringBoard's
-    // layout and crashes it (EXC_ARM_PAC_FAIL).
-    uint64_t result = r_msg_main(obj, isKindSel, cls, 0, 0, 0);
+    uint64_t result = r_msg(obj, isKindSel, cls, 0, 0, 0);
     return (result & 0xff) != 0;
 }
 
@@ -2022,23 +2019,18 @@ static uint64_t axn_find_badged_icon_view(uint64_t root, int depth, int *budget)
         return root;
     }
 
-    // Walk the live view hierarchy on SpringBoard's main thread (see above), and
-    // retain the subviews snapshot across the marshaled hops so it can't drain.
-    uint64_t subviews = r_msg2_main(root, "subviews", 0, 0, 0, 0);
+    uint64_t subviews = r_msg2(root, "subviews", 0, 0, 0, 0);
     if (!r_is_objc_ptr(subviews)) return 0;
-    r_msg2_main(subviews, "retain", 0, 0, 0, 0);
 
-    uint64_t count = r_msg2_main(subviews, "count", 0, 0, 0, 0);
+    uint64_t count = r_msg2(subviews, "count", 0, 0, 0, 0);
     if (count > 16) count = 16;
 
-    uint64_t hit = 0;
     for (uint64_t i = 0; i < count && *budget > 0; i++) {
-        uint64_t child = r_msg2_main(subviews, "objectAtIndex:", i, 0, 0, 0);
-        hit = axn_find_badged_icon_view(child, depth + 1, budget);
-        if (r_is_objc_ptr(hit)) break;
+        uint64_t child = r_msg2(subviews, "objectAtIndex:", i, 0, 0, 0);
+        uint64_t hit = axn_find_badged_icon_view(child, depth + 1, budget);
+        if (r_is_objc_ptr(hit)) return hit;
     }
-    r_msg2_main(subviews, "release", 0, 0, 0, 0);
-    return r_is_objc_ptr(hit) ? hit : 0;
+    return 0;
 }
 
 static uint64_t axn_image_from_badged_icon_view(uint64_t iconHostView)

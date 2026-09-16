@@ -1658,19 +1658,19 @@ static int themer_iter_iconviews(uint64_t listView,
     // wraps them (AMUIInfographIconListLayout adds intermediate containers).
     enum { IV_CAP = 64 };
     uint64_t ivs[IV_CAP];
-    int n = sb_collect_views_main(listView, iconViewCls, ivs, IV_CAP);
+    int n = sb_collect_views(listView, iconViewCls, ivs, IV_CAP);
 
     if (n == 0) {
         if (gThemerLogBudget > 0) {
-            uint64_t subs = r_msg2_main(listView, "subviews", 0, 0, 0, 0);
-            uint64_t sc = r_is_objc_ptr(subs) ? r_msg2_main(subs, "count", 0, 0, 0, 0) : 0;
+            uint64_t subs = r_msg2(listView, "subviews", 0, 0, 0, 0);
+            uint64_t sc = r_is_objc_ptr(subs) ? r_msg2(subs, "count", 0, 0, 0, 0) : 0;
             char lvCls[96];
             themer_read_class_name(listView, lvCls, sizeof(lvCls));
             printf("[THEMER] listView=0x%llx class=%s no iconViews; direct subviews=%llu\n",
                    (unsigned long long)listView, lvCls, (unsigned long long)sc);
             uint64_t cap = sc > 6 ? 6 : sc;
             for (uint64_t i = 0; i < cap; i++) {
-                uint64_t child = r_msg2_main(subs, "objectAtIndex:", i, 0, 0, 0);
+                uint64_t child = r_msg2(subs, "objectAtIndex:", i, 0, 0, 0);
                 char cls[96] = {0};
                 themer_read_class_name(child, cls, sizeof(cls));
                 printf("[THEMER]   subview[%llu]=0x%llx class=%s\n",
@@ -1831,7 +1831,7 @@ static int themer_repaint_cached_iconviews(uint64_t listView,
 
     enum { IV_CAP = 64 };
     uint64_t ivs[IV_CAP];
-    int n = sb_collect_views_main(listView, iconViewCls, ivs, IV_CAP);
+    int n = sb_collect_views(listView, iconViewCls, ivs, IV_CAP);
     int applied = 0;
 
     for (int i = 0; i < n; i++) {
@@ -1907,7 +1907,7 @@ static int themer_repaint_dynamic_iconviews(uint64_t listView,
 
     enum { IV_CAP = 64 };
     uint64_t ivs[IV_CAP];
-    int n = sb_collect_views_main(listView, iconViewCls, ivs, IV_CAP);
+    int n = sb_collect_views(listView, iconViewCls, ivs, IV_CAP);
     int applied = 0;
 
     for (int i = 0; i < n; i++) {
@@ -2138,7 +2138,7 @@ static bool themer_repaint_cached_views_internal(bool force)
 
     enum { LV_CAP = 64 };
     uint64_t lvs[LV_CAP];
-    int nlv = sb_collect_views_in_windows_main(listViewCls, lvs, LV_CAP);
+    int nlv = sb_collect_views_in_windows(listViewCls, lvs, LV_CAP);
     if (nlv == 0) {
         r_settle_us(prevSettle);
         printf("[THEMER] cached repaint: no visible SBIconListView\n");
@@ -2195,7 +2195,7 @@ bool themer_repaint_dynamic_cached_views_in_session(void)
 
     enum { LV_CAP = 64 };
     uint64_t lvs[LV_CAP];
-    int nlv = sb_collect_views_in_windows_main(listViewCls, lvs, LV_CAP);
+    int nlv = sb_collect_views_in_windows(listViewCls, lvs, LV_CAP);
     if (nlv == 0) {
         r_settle_us(prevSettle);
         printf("[THEMER] dynamic repaint: no visible SBIconListView\n");
@@ -2244,7 +2244,7 @@ bool themer_repaint_visible_theme_views_in_session(void)
 
     enum { LV_CAP = 64 };
     uint64_t lvs[LV_CAP];
-    int nlv = sb_collect_views_in_windows_main(listViewCls, lvs, LV_CAP);
+    int nlv = sb_collect_views_in_windows(listViewCls, lvs, LV_CAP);
     if (nlv == 0) {
         r_settle_us(prevSettle);
         printf("[THEMER] visible theme repaint: no visible SBIconListView\n");
@@ -2279,14 +2279,14 @@ static NSSet<NSString *> *themer_collect_visible_bundles(void)
 
     enum { LV_CAP = 64 };
     uint64_t lvs[LV_CAP];
-    int nlv = sb_collect_views_in_windows_main(listViewCls, lvs, LV_CAP);
+    int nlv = sb_collect_views_in_windows(listViewCls, lvs, LV_CAP);
     if (nlv == 0) return [NSSet set];
 
     NSMutableSet<NSString *> *bundles = [NSMutableSet set];
     for (int i = 0; i < nlv; i++) {
         enum { IV_CAP = 64 };
         uint64_t ivs[IV_CAP];
-        int n = sb_collect_views_main(lvs[i], iconViewCls, ivs, IV_CAP);
+        int n = sb_collect_views(lvs[i], iconViewCls, ivs, IV_CAP);
         for (int j = 0; j < n; j++) {
             char bundle[128] = {0};
             if (themer_read_bundle_for_iconview(ivs[j], bundle, sizeof(bundle)) && bundle[0]) {
@@ -2333,7 +2333,7 @@ bool themer_apply_data_in_session(NSDictionary<NSString *, NSData *> *imageDataB
 
     enum { LV_CAP = 64 };
     uint64_t lvs[LV_CAP];
-    int nlv = sb_collect_views_in_windows_main(listViewCls, lvs, LV_CAP);
+    int nlv = sb_collect_views_in_windows(listViewCls, lvs, LV_CAP);
     if (nlv == 0) {
         printf("[THEMER] no SBIconListView visible (home screen not active?)\n");
         r_settle_us(prevSettle);
