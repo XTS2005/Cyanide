@@ -2755,6 +2755,49 @@ static BOOL settings_ensure_kexploit(void)
     return YES;
 }
 
+// True when a KRW session can be had without running the exploit: one is
+// already live in this process, or a parked primitive is on disk for this
+// boot. Cheap on purpose (no kernel round-trip, no I/O beyond NSUserDefaults)
+// so cellForRowAtIndexPath can ask on every reload.
+static BOOL settings_krw_available_without_exploit(void)
+{
+    if (g_kexploit_done && kexploit_krw_session_active()) return YES;
+    return krw_persistence_has_saved_recovery();
+}
+
+// settings_ensure_kexploit() for read-only actions.
+//
+// Recovers a parked session, but refuses to run a fresh exploit chain. The
+// plain version acquires KRW by whatever means necessary, which turned a
+// "Read Current Value" tap into a full A18 chain run and panicked the device
+// on 2026-09-16 12:01 (same aperture signature as the other 14, 2.5 GB
+// footprint from the live staging mapping). A query must never cost that.
+static BOOL settings_ensure_kexploit_for_read(void)
+{
+    if (!settings_device_supported()) {
+        printf("[SETTINGS] unsupported device: %s\n", settings_unsupported_message().UTF8String);
+        return NO;
+    }
+
+    if (g_kexploit_done) {
+        if (kexploit_krw_ready()) return YES;
+        printf("[SETTINGS] cached KRW is stale; read-only action will not re-exploit\n");
+        g_kexploit_done = NO;
+        g_springboard_rc_ready = 0;
+        g_springboard_sandbox_escaped = 0;
+        kutils_reset_self_cache();
+        settings_notify_remote_call_state_changed();
+    }
+
+    if (kexploit_opa334_recover_only() != 0) {
+        printf("[SETTINGS] read-only action: no parked session to recover; not re-exploiting\n");
+        return NO;
+    }
+    g_kexploit_done = YES;
+    settings_notify_remote_call_state_changed();
+    return YES;
+}
+
 static BOOL settings_device_is_a18_above(void)
 {
     static BOOL result = NO;
@@ -3692,8 +3735,8 @@ static long long settings_read_lock_screen_duration(void)
         return -3;
     }
     @try {
-        if (!settings_ensure_kexploit()) {
-            printf("[LSD] read: kernel primitives were not acquired\n");
+        if (!settings_ensure_kexploit_for_read()) {
+            printf("[LSD] read: no kernel access; not running the exploit for a read\n");
             return -2;
         }
         @synchronized (settings_rc_lock()) {
@@ -4138,8 +4181,8 @@ static int settings_read_ota_status(void)
         return -3;
     }
     @try {
-        if (!settings_ensure_kexploit()) {
-            printf("[OTA] status read: kernel primitives were not acquired\n");
+        if (!settings_ensure_kexploit_for_read()) {
+            printf("[OTA] status read: no kernel access; not running the exploit for a read\n");
             return -2;
         }
         return darksword_ota_read_disabled();
@@ -4343,8 +4386,9 @@ static void settings_run_nano_probe_action(void)
             return;
         }
         @try {
-            if (!settings_ensure_kexploit()) {
-                log_user("[NANO-PROBE] Failed: kernel primitives were not acquired. Please try running chain again.\n");
+            if (!settings_ensure_kexploit_for_read()) {
+                log_user("[NANO-PROBE] Failed: no kernel access. Run the chain first — a probe "
+                         "will not start the exploit on its own.\n");
             } else {
                 (void)nano_registry_probe_pairing_assets();
             }
@@ -8135,7 +8179,8 @@ static _CyanideMailDelegate *_cyanide_mail_delegate(void) {
     return @[
         @{ @"kind": @"button", @"title": @"Disable OTA Updates" },
         @{ @"kind": @"button", @"title": @"Enable OTA Updates" },
-        @{ @"kind": @"button", @"title": @"Read Current Status" },
+        @{ @"kind": @"button", @"title": @"Read Current Status",
+           @"requiresKRW": @YES },
     ];
 }
 
@@ -8217,7 +8262,9 @@ static _CyanideMailDelegate *_cyanide_mail_delegate(void) {
            @"subtitle": @"Clears the floor; offers a respring to apply." },
         @{ @"kind": @"button", @"action": @"lockdur-read",
            @"title": @"Read Current Value",
-           @"subtitle": @"Shows the floor currently written in SpringBoard." },
+           @"requiresKRW": @YES,
+           @"subtitle": @"Shows the floor currently written in SpringBoard. "
+                        @"Needs kernel access — run the chain first." },
     ];
 }
 
@@ -10766,6 +10813,13 @@ void cyanide_present_contact(UIViewController *host)
         if (indexPath.section == SectionNanoRegistry &&
             [action isEqualToString:@"nano-load"]) {
             rowSupported = settings_nano_load_override_enabled();
+        }
+        // Read-only queries need a KRW session but must never start one --
+        // see settings_ensure_kexploit_for_read(). Grey them out until the
+        // chain has run (or a parked session is recoverable) so the button
+        // reads as unavailable instead of silently doing nothing.
+        if (rowSupported && [row[@"requiresKRW"] boolValue]) {
+            rowSupported = settings_krw_available_without_exploit();
         }
         UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"button" forIndexPath:dequeuePath];
         cell.selectionStyle = rowSupported ? UITableViewCellSelectionStyleDefault : UITableViewCellSelectionStyleNone;
