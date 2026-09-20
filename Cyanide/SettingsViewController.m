@@ -7836,19 +7836,15 @@ static _CyanideMailDelegate *_cyanide_mail_delegate(void) {
                                                  name:kSettingsCleanupStateDidChangeNotification
                                                object:nil];
 
-    // Always-visible Respring button in the nav bar (top-right) so the user
-    // doesn't have to scroll down to the Clean Up section to respring.
-    // Mirrors the same flow used by the Clean Up alert: prepare → present the
-    // existing WKWebView-based respring payload.
-    if (!self.detailMode) {
-        UIImage *icon = [UIImage systemImageNamed:@"arrow.clockwise.circle"];
-        UIBarButtonItem *respringItem = [[UIBarButtonItem alloc] initWithImage:icon
-                                                                          style:UIBarButtonItemStylePlain
-                                                                         target:self
-                                                                         action:@selector(navRespringTapped)];
-        respringItem.accessibilityLabel = @"Respring";
-        self.navigationItem.rightBarButtonItem = respringItem;
-    }
+    // Match the other tabs (Home, Packages, Sources): the Settings root shows a
+    // large title (centered via CYNavigationBar when that setting is on).
+    // Pushed bundle-detail pages keep the standard small inline title.
+    self.navigationController.navigationBar.prefersLargeTitles = YES;
+    self.navigationItem.largeTitleDisplayMode = self.detailMode
+        ? UINavigationItemLargeTitleDisplayModeNever
+        : UINavigationItemLargeTitleDisplayModeAlways;
+    // No nav-bar Respring button: the Actions section already has a Respring row,
+    // and two respring controls on one page is redundant.
 }
 
 - (void)presentRespringPromptWithTitle:(NSString *)title message:(NSString *)message
@@ -7886,12 +7882,6 @@ static _CyanideMailDelegate *_cyanide_mail_delegate(void) {
         });
     }]];
     settings_present_controller(ac, self);
-}
-
-- (void)navRespringTapped
-{
-    [self presentRespringPromptWithTitle:@"Respring?"
-                                 message:@"SpringBoard will restart. Any unsaved live state will be reset."];
 }
 
 - (void)runLockScreenDurationApply:(BOOL)remove
