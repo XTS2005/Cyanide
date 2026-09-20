@@ -331,10 +331,13 @@ static NSString * const kSourcesLastRefreshKey = @"RepoTweaksLastRefreshTimestam
 
 - (void)updateSourcesBadge
 {
+    // These updates belong to tweaks imported from source repos, which are
+    // browsed and managed in the Sources tab; the Packages list no longer shows
+    // them, so the count rides on Sources instead.
     NSUInteger count = repotweaks_available_update_count();
     NSString *badge = count > 0 ? [NSString stringWithFormat:@"%lu", (unsigned long)count] : nil;
     for (UIViewController *vc in self.viewControllers) {
-        if ([vc.tabBarItem.title isEqualToString:@"Packages"]) {
+        if ([vc.tabBarItem.title isEqualToString:@"Sources"]) {
             vc.tabBarItem.badgeValue = badge;
             break;
         }

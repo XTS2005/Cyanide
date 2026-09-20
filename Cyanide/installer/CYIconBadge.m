@@ -83,6 +83,16 @@ static const CGFloat kCYLargeTitleInset = 16.0;
 // table cards (which sit ~20pt from the edge) instead of the standard ~16pt.
 static const CGFloat kCYSearchBarInset = 20.0;
 
+// User preference: when NO, the bar behaves like a stock UINavigationBar
+// (left-aligned titles, standard search-bar width). Default YES. Unset is
+// treated as YES so this holds even before defaults registration runs. The key
+// mirrors kSettingsCenteredNavTitles in SettingsViewController.
+static BOOL cy_centered_titles_enabled(void)
+{
+    id v = [[NSUserDefaults standardUserDefaults] objectForKey:@"CenteredNavTitles"];
+    return (v == nil) ? YES : [v boolValue];
+}
+
 static BOOL cy_has_search_bar(UIView *root)
 {
     NSMutableArray<UIView *> *stack = [root.subviews mutableCopy];
@@ -134,8 +144,10 @@ static UILabel *cy_first_label_in(UIView *root)
         _cyDefaultMargins = self.directionalLayoutMargins;
         _cyCapturedDefaultMargins = YES;
     }
+    BOOL centered = cy_centered_titles_enabled();
+
     NSDirectionalEdgeInsets target = _cyDefaultMargins;
-    if (cy_has_search_bar(self)) {
+    if (centered && cy_has_search_bar(self)) {
         target.leading = MAX(target.leading, kCYSearchBarInset);
         target.trailing = MAX(target.trailing, kCYSearchBarInset);
     }
@@ -143,6 +155,10 @@ static UILabel *cy_first_label_in(UIView *root)
     if (fabs(cur.leading - target.leading) > 0.5 || fabs(cur.trailing - target.trailing) > 0.5) {
         self.directionalLayoutMargins = target;
     }
+
+    // Standard-appearance mode: leave the (already-default) large title where
+    // UIKit placed it and skip centering.
+    if (!centered) return;
 
     CGFloat barW = self.bounds.size.width;
     for (UIView *sub in self.subviews) {

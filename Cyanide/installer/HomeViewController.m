@@ -7,6 +7,7 @@
 #import "SourcesViewController.h"
 #import "../SettingsViewController.h"
 #import "../tweaks/RepoTweaks.h"
+#import "../tweaks/remote_objc.h"
 
 static NSString * const kGitHubIssuesURL = @"https://github.com/kolbicz/cyanide/issues";
 static NSString * const kGitHubRepoURL   = @"https://github.com/kolbicz/cyanide";
@@ -60,6 +61,50 @@ static const CGFloat kMargin = 20.0;
     [self.stack addArrangedSubview:[self buildWhatsNew]];
     [self.stack addArrangedSubview:[self buildGetStarted]];
     [self.stack addArrangedSubview:[self buildCommunity]];
+}
+
+- (void)viewWillAppear:(BOOL)animated
+{
+    [super viewWillAppear:animated];
+    // Force the pending layout so the hero card already has its final bounds
+    // when this appearance's first frame is composited. The gradient layer is
+    // not resized here: layoutIfNeeded runs viewDidLayoutSubviews:, which owns
+    // that (and every later pass).
+    [self.view layoutIfNeeded];
+}
+
+- (void)viewDidAppear:(BOOL)animated
+{
+    [super viewDidAppear:animated];
+    [self offerFastestApplySpeedIfNeeded];
+}
+
+// One-time migration: "Fastest" is now the default apply speed, but an existing
+// user's saved choice is left untouched on update. If they are not already on
+// Fastest, offer to switch — once. The "asked" flag is set before presenting so
+// declining (or dismissing) never re-prompts, and users already on Fastest are
+// never asked.
+- (void)offerFastestApplySpeedIfNeeded
+{
+    static NSString * const kAskedKey = @"SettleFastestMigrationAsked";
+    NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+    if ([d boolForKey:kAskedKey]) return;
+    if ([d integerForKey:kSettingsRemoteSettleMode] == 2) return; // already Fastest
+
+    [d setBool:YES forKey:kAskedKey];
+
+    UIAlertController *ac = [UIAlertController
+        alertControllerWithTitle:@"Faster tweak apply"
+                         message:@"Cyanide now defaults to the Fastest apply speed, which cuts the wait between remote calls. Switch to Fastest? You can change this any time in Settings → Launch Options."
+                  preferredStyle:UIAlertControllerStyleAlert];
+    [ac addAction:[UIAlertAction actionWithTitle:@"Not Now" style:UIAlertActionStyleCancel handler:nil]];
+    [ac addAction:[UIAlertAction actionWithTitle:@"Switch to Fastest"
+                                           style:UIAlertActionStyleDefault
+                                         handler:^(UIAlertAction *_) {
+        [d setInteger:2 forKey:kSettingsRemoteSettleMode];
+        r_settle_set_mode(2);
+    }]];
+    [self presentViewController:ac animated:YES completion:nil];
 }
 
 #pragma mark - Hero
@@ -558,8 +603,13 @@ static const CGFloat kMargin = 20.0;
             UINavigationController *nav = [vc isKindOfClass:UINavigationController.class] ? (UINavigationController *)vc : nil;
             if (!nav) return;
             [nav popToRootViewControllerAnimated:NO];
-            SettingsViewController *ql = [[SettingsViewController alloc] initWithUnderlyingSection:25 bundleTitle:@"QuickLoader"];
+            SettingsViewController *ql = [[SettingsViewController alloc] initWithUnderlyingSection:SectionQuickLoader bundleTitle:@"QuickLoader"];
             ql.quickLoaderStandalone = YES;
+            // QuickLoader has no package page to return to. It belongs with the
+            // JS-tweak sources flow, so the back button goes to the Sources front
+            // page instead of back to Home.
+            ql.installerReturnTabTitle = @"Sources";
+            ql.installerReturnResetsTargetTab = YES;
             [nav pushViewController:ql animated:NO];
             tab.selectedIndex = i;
             return;
