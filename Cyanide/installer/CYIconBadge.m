@@ -69,3 +69,36 @@ UIView *CYSectionHeaderView(NSString *title)
 
     return container;
 }
+
+@implementation CYNavigationBar {
+    BOOL _cyCapturedDefaultMargins;
+    NSDirectionalEdgeInsets _cyDefaultMargins;
+}
+
+// Root (tab) screens get a wider content inset so the large title and the
+// integrated search bar line up with the app's inset-grouped cards (~20pt), the
+// same on every tab. Pushed screens (a back button = more than one item on the
+// stack) keep the standard inset so the back button isn't shifted. This is the
+// public directionalLayoutMargins API only — no private-view manipulation.
+static const CGFloat kCYRootLeading = 20.0;
+
+- (void)layoutSubviews
+{
+    [super layoutSubviews];
+    if (!_cyCapturedDefaultMargins) {
+        _cyDefaultMargins = self.directionalLayoutMargins;
+        _cyCapturedDefaultMargins = YES;
+    }
+    BOOL isRoot = (self.items.count <= 1);
+    NSDirectionalEdgeInsets target = _cyDefaultMargins;
+    if (isRoot) {
+        target.leading  = MAX(target.leading,  kCYRootLeading);
+        target.trailing = MAX(target.trailing, kCYRootLeading);
+    }
+    NSDirectionalEdgeInsets cur = self.directionalLayoutMargins;
+    if (fabs(cur.leading - target.leading) > 0.5 || fabs(cur.trailing - target.trailing) > 0.5) {
+        self.directionalLayoutMargins = target;
+    }
+}
+
+@end

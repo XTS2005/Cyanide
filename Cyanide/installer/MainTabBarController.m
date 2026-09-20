@@ -9,6 +9,7 @@
 #import "PackageQueue.h"
 #import "HomeViewController.h"
 #import "SourcesViewController.h"
+#import "CYIconBadge.h"
 #import "../SettingsViewController.h"
 #import "../tweaks/RepoTweaks.h"
 
@@ -63,60 +64,68 @@ static NSString * const kSourcesLastRefreshKey = @"RepoTweaksLastRefreshTimestam
                                                               repeats:YES];
 }
 
+// Wrap a root view controller in a nav controller the SAME way for every tab, so
+// they behave identically (the storyboard vs code-created nav controllers gave
+// large titles different leading insets otherwise). CYNavigationBar lines the
+// title and search bar up with the app's cards.
+- (UINavigationController *)cy_tabNavWithRoot:(UIViewController *)root
+                                        title:(NSString *)title
+                                       symbol:(NSString *)symbol
+{
+    UINavigationController *nav =
+        [[UINavigationController alloc] initWithNavigationBarClass:CYNavigationBar.class toolbarClass:nil];
+    if (root) [nav setViewControllers:@[root]];
+    nav.navigationBar.barStyle = UIBarStyleBlack;
+    nav.tabBarItem = [[UITabBarItem alloc] initWithTitle:title
+                                                   image:[UIImage systemImageNamed:symbol]
+                                                     tag:0];
+    return nav;
+}
+
 - (void)installPackagesAndSourcesTabsIfNeeded
 {
-    NSMutableArray<UIViewController *> *controllers = [self.viewControllers mutableCopy];
-    if (controllers.count == 0) return;
-
-    UIViewController *packages = controllers.firstObject;
-    packages.tabBarItem.title = @"Packages";
-    packages.tabBarItem.image = [UIImage systemImageNamed:@"shippingbox.fill"];
-    if ([packages isKindOfClass:UINavigationController.class]) {
-        UINavigationController *nav = (UINavigationController *)packages;
-        nav.tabBarItem.title = @"Packages";
-        nav.topViewController.title = @"Packages";
-        nav.topViewController.navigationItem.title = @"Packages";
+    NSArray<UIViewController *> *existing = self.viewControllers;
+    if (existing.count == 0) return;
+    // Rebuild once: presence of the Home tab means it already ran.
+    for (UIViewController *vc in existing) {
+        if ([vc.tabBarItem.title isEqualToString:@"Home"]) return;
     }
 
-    // Inject Home tab at position 0 if not already present.
-    BOOL hasHome = NO;
-    for (UIViewController *vc in controllers) {
-        if ([vc.tabBarItem.title isEqualToString:@"Home"]) { hasHome = YES; break; }
-    }
-    if (!hasHome) {
-        HomeViewController *home = [[HomeViewController alloc] init];
-        UINavigationController *homeNav = [[UINavigationController alloc] init];
-        [homeNav setViewControllers:@[home]];
-        homeNav.navigationBar.barStyle = UIBarStyleBlack;
-        homeNav.tabBarItem = [[UITabBarItem alloc] initWithTitle:@"Home"
-                                                           image:[UIImage systemImageNamed:@"house.fill"]
-                                                             tag:0];
-        [controllers insertObject:homeNav atIndex:0];
+    // Reuse the storyboard-instantiated root VCs (they carry their configured
+    // table styles etc.), matched by class or tab title.
+    UIViewController *pkgRoot = nil, *setRoot = nil, *logRoot = nil;
+    for (UIViewController *vc in existing) {
+        if (![vc isKindOfClass:UINavigationController.class]) continue;
+        UIViewController *root = [(UINavigationController *)vc viewControllers].firstObject;
+        if (!root) continue;
+        NSString *cls = NSStringFromClass(root.class);
+        NSString *t = vc.tabBarItem.title;
+        if ([cls isEqualToString:@"PackagesViewController"] || [t isEqualToString:@"Packages"]) pkgRoot = root;
+        else if ([cls isEqualToString:@"SettingsViewController"] || [t isEqualToString:@"Settings"]) setRoot = root;
+        else if ([cls isEqualToString:@"LogViewController"] || [t isEqualToString:@"Log"]) logRoot = root;
     }
 
-    // Inject Sources tab right after Packages if not already present.
-    BOOL hasSources = NO;
-    for (UIViewController *vc in controllers) {
-        if ([vc.tabBarItem.title isEqualToString:@"Sources"]) { hasSources = YES; break; }
-    }
-    if (!hasSources) {
-        SourcesViewController *sources = [[SourcesViewController alloc] initWithStyle:UITableViewStyleInsetGrouped];
-        UINavigationController *nav = [[UINavigationController alloc] init];
-        [nav setViewControllers:@[sources]];
-        nav.navigationBar.barStyle = UIBarStyleBlack;
-        nav.tabBarItem = [[UITabBarItem alloc] initWithTitle:@"Sources"
-                                                       image:[UIImage systemImageNamed:@"tray.and.arrow.down.fill"]
-                                                         tag:0];
-        // Find Packages and insert Sources right after it.
-        NSUInteger pkgIdx = 0;
-        for (NSUInteger i = 0; i < controllers.count; i++) {
-            if ([controllers[i].tabBarItem.title isEqualToString:@"Packages"]) { pkgIdx = i; break; }
+    // Detach the reused roots from their old (storyboard) nav controllers before
+    // re-wrapping — a VC can only belong to one nav controller.
+    for (UIViewController *vc in existing) {
+        if ([vc isKindOfClass:UINavigationController.class]) {
+            [(UINavigationController *)vc setViewControllers:@[]];
         }
-        NSUInteger insertIndex = MIN(pkgIdx + 1, controllers.count);
-        [controllers insertObject:nav atIndex:insertIndex];
     }
 
-    [self setViewControllers:controllers animated:NO];
+    if (pkgRoot) { pkgRoot.title = @"Packages"; pkgRoot.navigationItem.title = @"Packages"; }
+
+    HomeViewController *home = [[HomeViewController alloc] init];
+    SourcesViewController *sources = [[SourcesViewController alloc] initWithStyle:UITableViewStyleInsetGrouped];
+
+    NSMutableArray<UIViewController *> *tabs = [NSMutableArray array];
+    [tabs addObject:[self cy_tabNavWithRoot:home    title:@"Home"     symbol:@"house.fill"]];
+    if (pkgRoot) [tabs addObject:[self cy_tabNavWithRoot:pkgRoot title:@"Packages" symbol:@"shippingbox.fill"]];
+    [tabs addObject:[self cy_tabNavWithRoot:sources title:@"Sources"  symbol:@"tray.and.arrow.down.fill"]];
+    if (logRoot) [tabs addObject:[self cy_tabNavWithRoot:logRoot title:@"Log"      symbol:@"terminal"]];
+    if (setRoot) [tabs addObject:[self cy_tabNavWithRoot:setRoot title:@"Settings" symbol:@"gear"]];
+
+    [self setViewControllers:tabs animated:NO];
     self.selectedIndex = 0;
 }
 
