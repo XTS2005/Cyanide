@@ -858,7 +858,6 @@ NSString * const kSettingsAutoRunKexploit    = @"AutoRunKexploit";
 NSString * const kSettingsRunSandboxEscape   = @"RunSandboxEscape";
 NSString * const kSettingsRunPatchSandboxExt = @"RunPatchSandboxExt";
 NSString * const kSettingsKeepAlive          = @"KeepAlive";
-NSString * const kSettingsCenteredNavTitles  = @"CenteredNavTitles";
 
 NSString * const kSettingsSBCEnabled    = @"SBCEnabled";
 NSString * const kSettingsSBCDockIcons  = @"SBCDockIcons";
@@ -6461,7 +6460,6 @@ void settings_register_defaults(void)
         // lands the PCB.
         kSettingsA18BoundedSearch:   @NO,
         kSettingsRemoteSettleMode:   @2,
-        kSettingsCenteredNavTitles:  @YES,
         kSettingsAutoRunKexploit:    @NO,
         kSettingsRunSandboxEscape:   @YES,
         kSettingsRunPatchSandboxExt: @NO,
@@ -7837,8 +7835,7 @@ static _CyanideMailDelegate *_cyanide_mail_delegate(void) {
                                                object:nil];
 
     // Match the other tabs (Home, Packages, Sources): the Settings root shows a
-    // large title (centered via CYNavigationBar when that setting is on).
-    // Pushed bundle-detail pages keep the standard small inline title.
+    // standard large title. Pushed bundle-detail pages keep the small inline title.
     self.navigationController.navigationBar.prefersLargeTitles = YES;
     self.navigationItem.largeTitleDisplayMode = self.detailMode
         ? UINavigationItemLargeTitleDisplayModeNever
@@ -8912,7 +8909,7 @@ static NSUInteger settings_tab_index_for_title(UITabBarController *tab, NSString
         case RootSectionTweakBundles:   return (NSInteger)self.tweakBundleRows.count;
         case RootSectionInDev:         return (NSInteger)self.inDevBundleRows.count;
         case RootSectionSystemBundles:  return (NSInteger)self.systemBundleRows.count;
-        case RootSectionAbout:          return 7;
+        case RootSectionAbout:          return 6;
         case RootSectionWarning:        return 0;
         case RootSectionCount:          return 0;
     }
@@ -9309,22 +9306,11 @@ static NSUInteger settings_tab_index_for_title(UITabBarController *tab, NSString
             cell.textLabel.text = @"App Icon";
             cell.detailTextLabel.text = [[self currentAppIconStyle] isEqualToString:@"classic"] ? @"Classic" : @"Modern";
             break;
-        case 3: {
-            cell.imageView.image = [SettingsViewController iconBadgeWithSymbol:@"textformat.alt" color:UIColor.systemOrangeColor size:29.0];
-            cell.textLabel.text = @"Centered titles";
-            cell.accessoryType = UITableViewCellAccessoryNone;
-            cell.selectionStyle = UITableViewCellSelectionStyleNone;
-            UISwitch *sw = [[UISwitch alloc] init];
-            sw.on = [[NSUserDefaults standardUserDefaults] boolForKey:kSettingsCenteredNavTitles];
-            [sw addTarget:self action:@selector(centeredTitlesSwitchChanged:) forControlEvents:UIControlEventValueChanged];
-            cell.accessoryView = sw;
-            break;
-        }
-        case 4:
+        case 3:
             cell.imageView.image = [SettingsViewController iconBadgeWithSymbol:@"doc.text.magnifyingglass" color:UIColor.systemGrayColor size:29.0];
             cell.textLabel.text = @"View Log";
             break;
-        case 5:
+        case 4:
             cell.imageView.image = [SettingsViewController iconBadgeWithSymbol:@"square.and.arrow.up" color:UIColor.systemGreenColor size:29.0];
             cell.textLabel.text = @"Share Log";
             break;
@@ -9346,18 +9332,6 @@ static NSUInteger settings_tab_index_for_title(UITabBarController *tab, NSString
     [[NSUserDefaults standardUserDefaults] setBool:sw.isOn forKey:kSettingsLogUploadEnabled];
 }
 
-- (void)centeredTitlesSwitchChanged:(UISwitch *)sw {
-    [[NSUserDefaults standardUserDefaults] setBool:sw.isOn forKey:kSettingsCenteredNavTitles];
-    // Cosmetic: re-lay-out every tab's nav bar so CYNavigationBar re-reads the
-    // preference and switches between centered and standard alignment.
-    for (UIViewController *vc in self.tabBarController.viewControllers) {
-        if ([vc isKindOfClass:UINavigationController.class]) {
-            UINavigationBar *bar = [(UINavigationController *)vc navigationBar];
-            [bar setNeedsLayout];
-            [bar layoutIfNeeded];
-        }
-    }
-}
 
 - (void)reloadThemerSectionAndQueue
 {
@@ -12246,10 +12220,9 @@ void cyanide_present_contact(UIViewController *host)
                         break;
                     }
                     case 2: [self showAppIconPicker]; break;
-                    // Row 3: Centered titles — UISwitch handles it
-                    case 4: [self openViewLog]; break;
-                    case 5: [self openShareLog]; break;
-                    // Row 6: Auto-Upload — UISwitch handles it
+                    case 3: [self openViewLog]; break;
+                    case 4: [self openShareLog]; break;
+                    // Row 5: Auto-Upload — UISwitch handles it
                 }
                 return;
             }

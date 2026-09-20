@@ -17,8 +17,7 @@
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.title = @"Log";
-    // Match the other tabs: large title (centered via CYNavigationBar when the
-    // "Centered navigation titles" setting is on).
+    // Match the other tabs: standard large title.
     self.navigationController.navigationBar.prefersLargeTitles = YES;
     self.navigationItem.largeTitleDisplayMode = UINavigationItemLargeTitleDisplayModeAlways;
     UIColor *bg = [UIColor colorWithRed:0.04 green:0.05 blue:0.07 alpha:1.0];

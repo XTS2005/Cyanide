@@ -57,7 +57,6 @@ extern NSString * const kSettingsAutoRunKexploit;
 extern NSString * const kSettingsRunSandboxEscape;
 extern NSString * const kSettingsRunPatchSandboxExt;
 extern NSString * const kSettingsKeepAlive;
-extern NSString * const kSettingsCenteredNavTitles;
 
 extern NSString * const kSettingsSBCEnabled;
 extern NSString * const kSettingsSBCDockIcons;

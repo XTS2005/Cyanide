@@ -9,7 +9,6 @@
 #import "PackageQueue.h"
 #import "HomeViewController.h"
 #import "SourcesViewController.h"
-#import "CYIconBadge.h"
 #import "../SettingsViewController.h"
 #import "../tweaks/RepoTweaks.h"
 
@@ -86,7 +85,7 @@ static NSString * const kSourcesLastRefreshKey = @"RepoTweaksLastRefreshTimestam
     }
     if (!hasHome) {
         HomeViewController *home = [[HomeViewController alloc] init];
-        UINavigationController *homeNav = [[UINavigationController alloc] initWithNavigationBarClass:CYNavigationBar.class toolbarClass:nil];
+        UINavigationController *homeNav = [[UINavigationController alloc] init];
         [homeNav setViewControllers:@[home]];
         homeNav.navigationBar.barStyle = UIBarStyleBlack;
         homeNav.tabBarItem = [[UITabBarItem alloc] initWithTitle:@"Home"
@@ -102,7 +101,7 @@ static NSString * const kSourcesLastRefreshKey = @"RepoTweaksLastRefreshTimestam
     }
     if (!hasSources) {
         SourcesViewController *sources = [[SourcesViewController alloc] initWithStyle:UITableViewStyleInsetGrouped];
-        UINavigationController *nav = [[UINavigationController alloc] initWithNavigationBarClass:CYNavigationBar.class toolbarClass:nil];
+        UINavigationController *nav = [[UINavigationController alloc] init];
         [nav setViewControllers:@[sources]];
         nav.navigationBar.barStyle = UIBarStyleBlack;
         nav.tabBarItem = [[UITabBarItem alloc] initWithTitle:@"Sources"
