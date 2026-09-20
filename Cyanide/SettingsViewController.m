@@ -8216,8 +8216,6 @@ static NSUInteger settings_tab_index_for_title(UITabBarController *tab, NSString
         @{ @"key": kSettingsA18BoundedSearch, @"peV1Only": @YES, @"a18Only": @YES, @"title": @"A18 bounded search",
            @"subtitle": @"On stops after 4 search passes and reports a clean retry instead of grinding — which can otherwise end in an aperture panic on a device that never lands the PCB. Off (default, matches 1.5.5) grinds until the exploit acquires. A18/M4 only; effective on the next fresh chain run." },
         @{ @"kind": @"settlemode", @"key": kSettingsRemoteSettleMode, @"title": @"Tweak apply speed" },
-        @{ @"key": kSettingsCenteredNavTitles,  @"title": @"Centered navigation titles",
-           @"subtitle": @"On centers the large titles and lines the Packages search bar up with the cards. Off uses the standard left-aligned iOS look." },
         @{ @"key": kSettingsAutoRunKexploit,    @"title": @"Auto-run kexploit on launch" },
         @{ @"key": kSettingsRunSandboxEscape,   @"title": @"Sandbox escape (escape_sbx_demo2)" },
         @{ @"key": kSettingsKeepAlive,          @"title": @"Keep app alive in background",
@@ -8914,7 +8912,7 @@ static NSUInteger settings_tab_index_for_title(UITabBarController *tab, NSString
         case RootSectionTweakBundles:   return (NSInteger)self.tweakBundleRows.count;
         case RootSectionInDev:         return (NSInteger)self.inDevBundleRows.count;
         case RootSectionSystemBundles:  return (NSInteger)self.systemBundleRows.count;
-        case RootSectionAbout:          return 6;
+        case RootSectionAbout:          return 7;
         case RootSectionWarning:        return 0;
         case RootSectionCount:          return 0;
     }
@@ -9311,11 +9309,22 @@ static NSUInteger settings_tab_index_for_title(UITabBarController *tab, NSString
             cell.textLabel.text = @"App Icon";
             cell.detailTextLabel.text = [[self currentAppIconStyle] isEqualToString:@"classic"] ? @"Classic" : @"Modern";
             break;
-        case 3:
+        case 3: {
+            cell.imageView.image = [SettingsViewController iconBadgeWithSymbol:@"textformat.alt" color:UIColor.systemOrangeColor size:29.0];
+            cell.textLabel.text = @"Centered titles";
+            cell.accessoryType = UITableViewCellAccessoryNone;
+            cell.selectionStyle = UITableViewCellSelectionStyleNone;
+            UISwitch *sw = [[UISwitch alloc] init];
+            sw.on = [[NSUserDefaults standardUserDefaults] boolForKey:kSettingsCenteredNavTitles];
+            [sw addTarget:self action:@selector(centeredTitlesSwitchChanged:) forControlEvents:UIControlEventValueChanged];
+            cell.accessoryView = sw;
+            break;
+        }
+        case 4:
             cell.imageView.image = [SettingsViewController iconBadgeWithSymbol:@"doc.text.magnifyingglass" color:UIColor.systemGrayColor size:29.0];
             cell.textLabel.text = @"View Log";
             break;
-        case 4:
+        case 5:
             cell.imageView.image = [SettingsViewController iconBadgeWithSymbol:@"square.and.arrow.up" color:UIColor.systemGreenColor size:29.0];
             cell.textLabel.text = @"Share Log";
             break;
@@ -9335,6 +9344,19 @@ static NSUInteger settings_tab_index_for_title(UITabBarController *tab, NSString
 
 - (void)logUploadSwitchChanged:(UISwitch *)sw {
     [[NSUserDefaults standardUserDefaults] setBool:sw.isOn forKey:kSettingsLogUploadEnabled];
+}
+
+- (void)centeredTitlesSwitchChanged:(UISwitch *)sw {
+    [[NSUserDefaults standardUserDefaults] setBool:sw.isOn forKey:kSettingsCenteredNavTitles];
+    // Cosmetic: re-lay-out every tab's nav bar so CYNavigationBar re-reads the
+    // preference and switches between centered and standard alignment.
+    for (UIViewController *vc in self.tabBarController.viewControllers) {
+        if ([vc isKindOfClass:UINavigationController.class]) {
+            UINavigationBar *bar = [(UINavigationController *)vc navigationBar];
+            [bar setNeedsLayout];
+            [bar layoutIfNeeded];
+        }
+    }
 }
 
 - (void)reloadThemerSectionAndQueue
@@ -11549,18 +11571,6 @@ void cyanide_present_contact(UIViewController *host)
         ds_keepalive_apply_enabled(sender.isOn);
         return;
     }
-    if ([key isEqualToString:kSettingsCenteredNavTitles]) {
-        // Cosmetic only: re-lay-out every tab's nav bar so CYNavigationBar
-        // re-reads the preference and switches between centered and standard.
-        for (UIViewController *vc in self.tabBarController.viewControllers) {
-            if ([vc isKindOfClass:UINavigationController.class]) {
-                UINavigationBar *bar = [(UINavigationController *)vc navigationBar];
-                [bar setNeedsLayout];
-                [bar layoutIfNeeded];
-            }
-        }
-        return;
-    }
     if (settings_key_affects_package_state(key)) {
         if (!sender.isOn) settings_mark_tweak_applied(key, NO);
         settings_notify_package_queue_changed_async();
@@ -12236,9 +12246,10 @@ void cyanide_present_contact(UIViewController *host)
                         break;
                     }
                     case 2: [self showAppIconPicker]; break;
-                    case 3: [self openViewLog]; break;
-                    case 4: [self openShareLog]; break;
-                    // Row 5: Auto-Upload — UISwitch handles it
+                    // Row 3: Centered titles — UISwitch handles it
+                    case 4: [self openViewLog]; break;
+                    case 5: [self openShareLog]; break;
+                    // Row 6: Auto-Upload — UISwitch handles it
                 }
                 return;
             }
