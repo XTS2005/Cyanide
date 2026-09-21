@@ -286,8 +286,13 @@ static bool auto_add_app_to_dock(uint64_t iconCtrl, int dockIcons, const char *b
         : 0;
     release_remote_object(bundle);
     if (!r_is_objc_ptr(icon)) {
-        printf("[SBC:DOCKAPP] app not found bundle=%s\n", bundleID);
-        return false;
+        // The configured dock app simply isn't installed on this device. That is
+        // not a failure of the home-screen customization — there's just nothing to
+        // move. Returning false here marked the whole SBCustomizer apply as failed
+        // (ok = arrangeOK && dockAppOK), which showed a spurious "pending change"
+        // on devices without that app (e.g. iOS 17 test devices without Watusi).
+        printf("[SBC:DOCKAPP] app not installed bundle=%s — skipping (not a failure)\n", bundleID);
+        return true;
     }
 
     uint64_t dockIconsArray = model_icons_retained(dockModel);
@@ -838,6 +843,34 @@ static int rebalance_impl(uint64_t rootFolder, uint64_t count,
 
         printf("[SBC:ARRANGE] page[%llu] icons %llu -> %llu target=%llu\n",
                page, before, current == UINT64_MAX ? 0 : current, desired);
+    }
+
+    // The drain loop above pushes overflow onto page+1 but never processes the
+    // final page -- there is no page+1 to receive its overflow, and no API here
+    // to append a home-screen page. When a grid shrink leaves total capacity
+    // smaller than the icon count, the surplus piles onto the last page beyond
+    // what its grid can display; those icons land off-grid and disappear. That
+    // is the intermittent "missing app icon" bug -- a manual re-run only fixed
+    // it because SpringBoard's own relayout happened to redistribute them.
+    // Guarantee visibility instead: if the last page holds more icons than its
+    // grid shows, grow that page's grid (same columns, more rows) to fit them.
+    if (!failed && count > 0) {
+        uint64_t lastPage  = count - 1;
+        uint64_t lastModel = page_model_at(rootFolder, lastPage);
+        uint64_t lastCount = icon_array_count_transient(lastModel);
+        uint64_t lastCap   = (uint64_t)(lastPage == 0 ? firstPageIcons : otherPageIcons);
+        if (r_is_objc_ptr(lastModel) && lastCount != UINT64_MAX && lastCount > lastCap &&
+            r_responds(lastModel, "gridSize") && r_responds(lastModel, "setGridSize:")) {
+            uint64_t grid = r_msg2(lastModel, "gridSize", 0, 0, 0, 0) & 0xffffffffULL;
+            uint64_t cols = grid & 0xffffULL;
+            if (cols == 0) cols = 4;
+            uint64_t rowsNeeded = (lastCount + cols - 1) / cols;
+            uint64_t newGrid = ((rowsNeeded & 0xffffULL) << 16) | (cols & 0xffffULL);
+            r_msg2(lastModel, "setGridSize:", newGrid, 0, 0, 0);
+            printf("[SBC:ARRANGE] last page[%llu] overflow %llu > cap %llu; grid grown to "
+                   "%llux%llu so no icon is left off-grid\n",
+                   lastPage, lastCount, lastCap, cols, rowsNeeded);
+        }
     }
     return failed ? -1 : moved;
 }

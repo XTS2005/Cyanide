@@ -16,6 +16,7 @@
 #import <Foundation/Foundation.h>
 #import <stdio.h>
 #import <stdint.h>
+#import <stdlib.h>
 #import <string.h>
 #import <unistd.h>
 
@@ -229,8 +230,16 @@ static bool rc_set_insets_on(uint64_t cfg, uint64_t clsInv,
     return true;
 }
 
+// When async is true the invocation is fired onto SpringBoard's main thread
+// WITHOUT waiting for it to finish. Setting the icon size makes SpringBoard
+// regenerate every icon image, which takes several seconds; with waitUntilDone
+// that stall lands on our worker thread and freezes the whole apply run. Firing
+// it async lets SpringBoard do that work on its own thread in the background
+// while the run continues. We retainArguments first so the invocation owns its
+// target and the copied struct even after this function returns and the local
+// buffer is freed.
 static bool rc_set_icon_info_on(uint64_t cfg, uint64_t clsInv,
-                                const RC_SBIconImageInfo *info)
+                                const RC_SBIconImageInfo *info, bool async)
 {
     if (!cfg || !clsInv) return false;
     uint64_t selSetIconInfo = r_sel("setIconImageInfo:");
@@ -253,21 +262,51 @@ static bool rc_set_icon_info_on(uint64_t cfg, uint64_t clsInv,
     if (!mem) return false;
     if (!remote_write(mem, info, sizeof(*info))) { r_free(mem); return false; }
     r_msg(inv, selSetArg, mem, 2, 0, 0);
-    r_msg(inv, selPerform, selInvoke, 0, 1, 0);
+    if (async) r_msg(inv, r_sel("retainArguments"), 0, 0, 0, 0);
+    r_msg(inv, selPerform, selInvoke, 0, async ? 0 : 1, 0);
     r_free(mem);
     return true;
 }
 
-// SBApplicationIcon only — widgets/folders assert on forced 60x60.
+// True for the icon classes we resize: real app icons, PLUS the special dynamic
+// app icons for Clock and Calendar (SBHClockApplicationIcon /
+// SBHCalendarApplicationIcon on iOS 18's SpringBoardHome), which are NOT
+// SBApplicationIcon subclasses and so were silently skipped — they stayed full
+// size until the page was next laid out. Deliberately an allow-list: it excludes
+// widgets (SBWidgetIcon), App Library pods (SBHLibraryPodCategoryIcon) and
+// folders, which we must not touch (forcing a 60x60 image info on those asserts /
+// is unwanted).
+static bool rc_icon_is_resizable(uint64_t icon)
+{
+    if (!icon) return false;
+    static const char *kClasses[] = {
+        "SBApplicationIcon",
+        "SBHClockApplicationIcon",
+        "SBHCalendarApplicationIcon",
+        NULL,
+    };
+    uint64_t selKind = r_sel("isKindOfClass:");
+    for (int i = 0; kClasses[i]; i++) {
+        uint64_t cls = r_class(kClasses[i]);
+        if (cls && r_msg(icon, selKind, cls, 0, 0, 0)) return true;
+    }
+    return false;
+}
+
+// Resize one live SBIconView's image immediately. setIconImageInfo: on the layout
+// configuration alone is LAZY — a view only adopts the new size on its next
+// natural relayout (a page swipe, or a touch on the dock). Setting it on the view
+// itself plus -_updateAfterManualIconImageInfoChangeInvalidatingLayout: forces
+// the change to show now. Done synchronously (waitUntilDone:YES) so the resize is
+// applied before the run reports done. Only the app-icon classes above — never
+// widgets/pods/folders.
 static void rc_refresh_icon_view(uint64_t iconView, uint64_t clsInv,
                                  const RC_SBIconImageInfo *info)
 {
     if (!iconView) return;
-    uint64_t appIconCls = r_class("SBApplicationIcon");
-    if (!appIconCls) return;
     uint64_t icon = rc_safe_msg(iconView, "icon", 0, 0, 0, 0);
     if (!icon) return;
-    if (!r_msg(icon, r_sel("isKindOfClass:"), appIconCls, 0, 0, 0)) return;
+    if (!rc_icon_is_resizable(icon)) return;
 
     uint64_t selSig     = r_sel("methodSignatureForSelector:");
     uint64_t selWithSig = r_sel("invocationWithMethodSignature:");
@@ -313,6 +352,10 @@ static void rc_refresh_icon_view(uint64_t iconView, uint64_t clsInv,
     }
 }
 
+// Walk one SBIconListView's children on SpringBoard's main thread and resize each
+// SBIconView. Returns how many were touched. The walk marshals every hop to main
+// (r_msg_main) — doing it on the RemoteCall worker thread crashes SpringBoard
+// (EXC_ARM_PAC_FAIL). No per-icon sleep.
 static int rc_refresh_list_view(uint64_t listView, uint64_t clsInv,
                                 const RC_SBIconImageInfo *info)
 {
@@ -320,9 +363,6 @@ static int rc_refresh_list_view(uint64_t listView, uint64_t clsInv,
     uint64_t clsIconView = r_class("SBIconView");
     if (!clsIconView) return 0;
 
-    // Walk the live view hierarchy on SpringBoard's main thread: doing this on
-    // the RemoteCall worker thread races SpringBoard's own layout and crashes it
-    // (EXC_ARM_PAC_FAIL). Retain the subviews snapshot across the marshaled hops.
     uint64_t subs = r_msg_main(listView, r_sel("subviews"), 0, 0, 0, 0);
     if (!subs) return 0;
     r_msg_main(subs, r_sel("retain"), 0, 0, 0, 0);
@@ -338,7 +378,6 @@ static int rc_refresh_list_view(uint64_t listView, uint64_t clsInv,
         if (!r_msg_main(v, selKind, clsIconView, 0, 0, 0)) continue;
         rc_refresh_icon_view(v, clsInv, info);
         touched++;
-        usleep(10000);
     }
     r_msg_main(subs, r_sel("release"), 0, 0, 0, 0);
     return touched;
@@ -432,7 +471,13 @@ bool darksword_layout_home_scale_in_session(double scale)
         .scale        = 2.0,
         .cornerRadius = 13.5 * scale,
     };
-    if (!rc_set_icon_info_on(cfg, clsInv, &info)) return false;
+
+    // Set the size on the root layout config (async, for persistence + future
+    // relayouts), then eagerly resize the live icon views so the change shows
+    // during the run. The walk runs on SpringBoard's main thread; right after the
+    // SBCustomizer arrange it waits for SpringBoard to finish its 12-page grid
+    // relayout — that wait is the icon re-render itself.
+    rc_set_icon_info_on(cfg, clsInv, &info, /*async=*/true);
 
     uint64_t clsListView = r_class("SBIconListView");
     enum { LV_CAP = 64 };
@@ -446,10 +491,12 @@ bool darksword_layout_home_scale_in_session(double scale)
             if (rv) nlv = sb_collect_views_main(rv, clsListView, lvs, LV_CAP);
         }
     }
+    int touched = 0;
     for (int i = 0; i < nlv; i++) {
         if (rc_safe_msg(lvs[i], "isDock", 0, 0, 0, 0)) continue;
-        rc_refresh_list_view(lvs[i], clsInv, &info);
+        touched += rc_refresh_list_view(lvs[i], clsInv, &info);
     }
+    printf("[HSSCALE] resized %d live icon view(s)\n", touched);
     return true;
 }
 
@@ -473,7 +520,10 @@ bool darksword_layout_dock_scale_in_session(double scale)
         .scale        = 2.0,
         .cornerRadius = 13.5 * scale,
     };
-    if (dockCfg) rc_set_icon_info_on(dockCfg, clsInv, &info);
+
+    // Set the dock's icon size on its layout config (async), then eagerly resize
+    // the live dock icon views so it shows during the run.
+    if (dockCfg) rc_set_icon_info_on(dockCfg, clsInv, &info, /*async=*/true);
 
     int touched = rc_refresh_list_view(dock, clsInv, &info);
     if (touched == 0) {
@@ -482,11 +532,11 @@ bool darksword_layout_dock_scale_in_session(double scale)
         uint64_t lvs[LV_CAP];
         int nlv = sb_collect_views_in_windows_main(clsListView, lvs, LV_CAP);
         for (int i = 0; i < nlv; i++) {
-            if (rc_safe_msg(lvs[i], "isDock", 0, 0, 0, 0)) {
-                rc_refresh_list_view(lvs[i], clsInv, &info);
-            }
+            if (rc_safe_msg(lvs[i], "isDock", 0, 0, 0, 0))
+                touched += rc_refresh_list_view(lvs[i], clsInv, &info);
         }
     }
+    printf("[DOCKSCALE] resized %d live dock icon view(s)\n", touched);
     return true;
 }
 

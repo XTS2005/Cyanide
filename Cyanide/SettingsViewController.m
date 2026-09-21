@@ -2685,6 +2685,50 @@ static void settings_progress(NSUInteger *step, NSUInteger total, const char *me
              message);
 }
 
+// A main-queue heartbeat for long, blocking apply steps. Some steps park the
+// background actions thread inside a single synchronous RemoteCall for several
+// seconds — most notably HSSCALE, whose first -setIconImageInfo: waits ~5s behind
+// SpringBoard's post-arrange grid relayout. During that call the actions thread
+// can't emit anything, so the log screen looks frozen. This timer runs on the
+// main thread (which stays free — the blocked thread is SpringBoard's, in another
+// process) and logs an elapsed-time line every second so the user sees progress.
+// The first tick is at +1s, so steps that finish quickly produce no heartbeat.
+static dispatch_source_t g_apply_heartbeat_timer;   // main-queue only
+static NSTimeInterval     g_apply_heartbeat_start;
+static NSString          *g_apply_heartbeat_label;
+
+static void settings_apply_heartbeat_start(NSString *label)
+{
+    NSString *msg = label.length ? label : @"Working";
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (g_apply_heartbeat_timer) return;   // one at a time
+        g_apply_heartbeat_start = [NSDate timeIntervalSinceReferenceDate];
+        g_apply_heartbeat_label = msg;
+        dispatch_source_t t = dispatch_source_create(
+            DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
+        dispatch_source_set_timer(t,
+            dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
+            (uint64_t)(1.0 * NSEC_PER_SEC), (uint64_t)(0.2 * NSEC_PER_SEC));
+        dispatch_source_set_event_handler(t, ^{
+            int secs = (int)([NSDate timeIntervalSinceReferenceDate]
+                             - g_apply_heartbeat_start + 0.5);
+            log_user("      … %s (%ds)\n", g_apply_heartbeat_label.UTF8String, secs);
+        });
+        g_apply_heartbeat_timer = t;
+        dispatch_resume(t);
+    });
+}
+
+static void settings_apply_heartbeat_stop(void)
+{
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (!g_apply_heartbeat_timer) return;
+        dispatch_source_cancel(g_apply_heartbeat_timer);
+        g_apply_heartbeat_timer = nil;
+        g_apply_heartbeat_label = nil;
+    });
+}
+
 static BOOL settings_try_claim_actions_lock(const char *owner, const char *busyMessage)
 {
     if (__sync_lock_test_and_set(&g_settings_actions_running, 1)) {
@@ -7194,7 +7238,11 @@ static void settings_run_actions_internal(BOOL pendingOnly)
                     // SBCustomizer has finished moving icons.
                     if (runLayoutExtras) {
                         settings_progress(&step, total, "Applying Home Layout Extras to final icon layout");
+                        // HSSCALE's first icon resize parks ~5s behind SpringBoard's
+                        // grid relayout; tick a heartbeat so the screen isn't frozen.
+                        settings_apply_heartbeat_start(@"Resizing icons — SpringBoard is laying out the new grid");
                         bool ok = settings_apply_layout_extras_from_defaults_locked(d);
+                        settings_apply_heartbeat_stop();
                         settings_mark_tweak_applied(kSettingsLayoutExtrasEnabled, ok);
                         printf("[SETTINGS] Layout extras result=%d\n", ok);
                         log_user("%s Home Layout Extras %s.\n",

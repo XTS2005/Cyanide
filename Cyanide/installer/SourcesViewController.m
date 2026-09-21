@@ -191,6 +191,10 @@ static UIColor *category_color(NSString *cat)
     NSDictionary *repo = sources_repo_for_url(self.repoURL);
     NSString *name = sources_string_or_empty(repo[@"repoName"]);
     self.title = name.length ? name : @"Source";
+    // Big title on the drill-down too, aligned with the root's inset. The jump
+    // that used to happen here is fixed in CYNavigationBar: the leading margin is
+    // now constant across root and pushed screens, so the large title keeps its
+    // 20pt padding through the push instead of snapping left.
     self.navigationItem.largeTitleDisplayMode = UINavigationItemLargeTitleDisplayModeAlways;
     self.tableView.rowHeight = UITableViewAutomaticDimension;
     self.tableView.estimatedRowHeight = 68.0;

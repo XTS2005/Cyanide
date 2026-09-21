@@ -75,11 +75,18 @@ UIView *CYSectionHeaderView(NSString *title)
     NSDirectionalEdgeInsets _cyDefaultMargins;
 }
 
-// Root (tab) screens get a wider content inset so the large title and the
-// integrated search bar line up with the app's inset-grouped cards (~20pt), the
-// same on every tab. Pushed screens (a back button = more than one item on the
-// stack) keep the standard inset so the back button isn't shifted. This is the
-// public directionalLayoutMargins API only — no private-view manipulation.
+// A wider content inset (~20pt) so the large title and the integrated search bar
+// line up with the app's inset-grouped cards, the same on every screen. This is
+// applied CONSTANTLY — root and pushed screens alike — on purpose: earlier the
+// inset was widened only on root screens and reset on push, but a single
+// navigation-bar leading margin governs BOTH the large-title inset and the
+// bar-button (back button) position, and both are on screen during a push. So
+// toggling it mid-transition made the root's large title visibly jump from 20pt
+// to the default inset as you drilled into a source. Keeping it constant means
+// the margin never changes during a transition, so nothing can jump. The cost is
+// that the back button on pushed screens sits at the same 20pt indent (aligned
+// with the content), which is consistent rather than jarring. Public
+// directionalLayoutMargins API only — no private-view manipulation.
 static const CGFloat kCYRootLeading = 20.0;
 
 - (void)layoutSubviews
@@ -89,12 +96,9 @@ static const CGFloat kCYRootLeading = 20.0;
         _cyDefaultMargins = self.directionalLayoutMargins;
         _cyCapturedDefaultMargins = YES;
     }
-    BOOL isRoot = (self.items.count <= 1);
     NSDirectionalEdgeInsets target = _cyDefaultMargins;
-    if (isRoot) {
-        target.leading  = MAX(target.leading,  kCYRootLeading);
-        target.trailing = MAX(target.trailing, kCYRootLeading);
-    }
+    target.leading  = MAX(target.leading,  kCYRootLeading);
+    target.trailing = MAX(target.trailing, kCYRootLeading);
     NSDirectionalEdgeInsets cur = self.directionalLayoutMargins;
     if (fabs(cur.leading - target.leading) > 0.5 || fabs(cur.trailing - target.trailing) > 0.5) {
         self.directionalLayoutMargins = target;
