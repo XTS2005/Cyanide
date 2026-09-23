@@ -1089,6 +1089,8 @@ static volatile int g_springboard_rc_ready = 0;
 static volatile int g_springboard_sandbox_escaped = 0;
 static volatile int g_statbar_live_running = 0;
 static volatile int g_statbar_live_stop_requested = 0;
+static volatile int g_labels_live_running = 0;        // iOS 17 Hide Labels loop
+static volatile int g_labels_live_stop_requested = 0;
 static volatile int g_nsbar_live_running = 0;
 static volatile int g_nsbar_live_stop_requested = 0;
 static volatile int g_nicebarlite_live_running = 0;
@@ -1203,6 +1205,7 @@ typedef struct {
 } SettingsSpringBoardTweakCleanupEntry;
 
 static void settings_request_statbar_stop(void) { g_statbar_live_stop_requested = 1; }
+static void settings_request_labels_stop(void) { g_labels_live_stop_requested = 1; }
 static void settings_request_nsbar_stop(void) { g_nsbar_live_stop_requested = 1; }
 static void settings_request_nicebarlite_stop(void) { g_nicebarlite_live_stop_requested = 1; }
 static void settings_request_axonlite_stop(void) { g_axonlite_live_stop_requested = 1; }
@@ -1216,6 +1219,11 @@ static void settings_request_stagestrip_stop(void) { stagestrip_stop_control_loo
 static void settings_request_livewp_stop(void) { g_livewp_live_stop_requested = 1; }
 
 static BOOL settings_statbar_running(void) { return g_statbar_live_running != 0; }
+static BOOL settings_labels_running(void) { return g_labels_live_running != 0; }
+// Hide Labels has nothing to actively undo on stop — labels reset on respring,
+// and we simply stop re-hiding. So stop/forget are no-ops.
+static bool settings_stop_labels_registered(BOOL springboardWillDie) { (void)springboardWillDie; return true; }
+static void settings_labels_forget_remote_state(void) { }
 static BOOL settings_nsbar_running(void) { return g_nsbar_live_running != 0; }
 static BOOL settings_nicebarlite_running(void) { return g_nicebarlite_live_running != 0; }
 static BOOL settings_axonlite_running(void) { return g_axonlite_live_running != 0; }
@@ -1346,6 +1354,7 @@ static void settings_each_springboard_cleanup_entry(void (^block)(const Settings
     // termination cleanup, live-loop waits, and applied-state reset stay in sync.
     const SettingsSpringBoardTweakCleanupEntry entries[] = {
         { kSettingsStatBarEnabled, "StatBar", settings_request_statbar_stop, settings_stop_statbar_registered, statbar_forget_remote_state, settings_statbar_running, YES, YES },
+        { kSettingsSBCHideLabels, "Hide Labels", settings_request_labels_stop, settings_stop_labels_registered, settings_labels_forget_remote_state, settings_labels_running, YES, YES },
         { kSettingsNSBarEnabled, "NSBar", settings_request_nsbar_stop, settings_stop_nsbar_registered, nsbar_forget_remote_state, settings_nsbar_running, YES, YES },
         { kSettingsNiceBarLiteEnabled, "NiceBar Lite", settings_request_nicebarlite_stop, settings_stop_nicebarlite_registered, nicebarlite_forget_remote_state, settings_nicebarlite_running, YES, YES },
         { kSettingsAxonLiteEnabled, "Axon Lite", settings_request_axonlite_stop, settings_stop_axonlite_registered, axonlite_forget_remote_state, settings_axonlite_running, YES, YES },
@@ -1468,6 +1477,13 @@ static const NSInteger kNanoUIRowMax = 999;
 static const useconds_t kStatBarLiveIntervalUS = 1000000;
 static const NSInteger kStatBarDefaultRefreshRateSec = 1;
 static const NSUInteger kStatBarLiveMaxTicks = 43200;
+// Hide Labels loop (iOS 17 only): iOS 17 tears down off-screen pages' icon views
+// and rebuilds them (with labels) on swipe, so labels can only be hidden once a
+// page is shown. To make that near-instant without hammering, the loop polls a
+// cheap current-page identity every 100ms and only does the full hide when the
+// page changes (a swipe) — plus a periodic fallback for stragglers.
+static const useconds_t kLabelsLiveIntervalUS = 100000;
+static const NSUInteger kLabelsLiveMaxTicks = 400000;
 static const useconds_t kNSBarLiveIntervalUS = 1000000;
 static const useconds_t kNSBarLiveBackgroundIntervalUS = 1500000;
 static const NSUInteger kNSBarLiveMaxTicks = 43200;
@@ -1743,6 +1759,7 @@ static uint64_t settings_now_us(void) {
 static void settings_apply_statbar_once_async(const char *reason);
 static void settings_apply_nsbar_once_async(const char *reason);
 static void settings_apply_nicebarlite_once_async(const char *reason);
+static void settings_apply_labels_once_async(const char *reason);
 static void settings_start_livewp_live_loop(void);
 static void settings_resume_livewp_after_wake_async(const char *reason);
 static void settings_pause_livewp_for_sleep_async(const char *reason);
@@ -2239,6 +2256,7 @@ static void settings_install_screen_awake_observers(void)
                 settings_apply_statbar_once_async("screen awake");
                 settings_apply_nsbar_once_async("screen awake");
                 settings_apply_nicebarlite_once_async("screen awake");
+                settings_apply_labels_once_async("screen awake");
                 settings_resume_livewp_after_wake_async("screen awake");
                 settings_schedule_themer_quiet_repair_burst("screen awake");
                 settings_restart_gravity_motion_if_active("screen awake");
@@ -2260,6 +2278,7 @@ static void settings_install_screen_awake_observers(void)
                 settings_apply_statbar_once_async("screen awake");
                 settings_apply_nsbar_once_async("screen awake");
                 settings_apply_nicebarlite_once_async("screen awake");
+                settings_apply_labels_once_async("display awake");
                 settings_resume_livewp_after_wake_async("display awake");
                 settings_schedule_themer_quiet_repair_burst("display awake");
                 settings_restart_gravity_motion_if_active("display awake");
@@ -4689,6 +4708,130 @@ static void settings_start_statbar_live_loop(void)
     });
 }
 
+static int settings_current_ios_major(void)
+{
+    return (int)[[NSProcessInfo processInfo] operatingSystemVersion].majorVersion;
+}
+
+// iOS 17 Hide Labels live loop. iOS 18+ has a durable layout-config label switch
+// (handled in SBCustomizer), so this only runs on iOS < 18. Each tick re-hides
+// the current home-screen page's icon labels; the per-view flag survives relayout,
+// so a page only needs hiding the first time it's swiped into view. Keeping the
+// SpringBoard session alive is handled by the "Hide Labels" cleanup-table entry,
+// gated on kSettingsSBCHideLabels being applied (marked below).
+static void settings_start_labels_live_loop(void)
+{
+    if (!settings_device_supported()) return;
+    if (settings_cleanup_in_progress()) return;
+    if (settings_current_ios_major() >= 18) return;   // config lever handles 18+
+
+    NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+    if (![d boolForKey:kSettingsSBCEnabled] || ![d boolForKey:kSettingsSBCHideLabels]) return;
+
+    if (__sync_lock_test_and_set(&g_labels_live_running, 1)) {
+        static volatile int loggedAlready = 0;
+        if (__sync_bool_compare_and_swap(&loggedAlready, 0, 1))
+            printf("[SETTINGS] Hide Labels live loop already running\n");
+        return;
+    }
+    if (settings_cleanup_in_progress()) { __sync_lock_release(&g_labels_live_running); return; }
+
+    // Mark applied so settings_has_persistent_springboard_remote_call_user() keeps
+    // the SpringBoard session alive for the loop.
+    settings_mark_tweak_applied(kSettingsSBCHideLabels, YES);
+    g_labels_live_stop_requested = 0;
+    dispatch_async(dispatch_get_global_queue(0, 0), ^{
+        NSUInteger tick = 0;
+        NSUInteger failures = 0;
+        NSUInteger hotTicks = 0;   // keep hiding briefly after a page change
+        uint64_t lastToken = 0;
+        BOOL wasAsleep = NO;       // force a re-hide on the first awake tick
+        printf("[SETTINGS] Hide Labels live loop started interval=%uus\n", kLabelsLiveIntervalUS);
+        @try {
+            while ([d boolForKey:kSettingsSBCEnabled] &&
+                   [d boolForKey:kSettingsSBCHideLabels] &&
+                   !settings_cleanup_in_progress() &&
+                   !g_labels_live_stop_requested &&
+                   tick < kLabelsLiveMaxTicks) {
+                if (!settings_statbar_screen_awake()) {
+                    wasAsleep = YES;   // unlock re-renders the home screen w/ labels
+                    settings_live_loop_sleep_interruptible(0, kLabelsLiveIntervalUS,
+                                                           &g_labels_live_stop_requested);
+                    continue;
+                }
+                bool haveSession = false;
+                @synchronized (settings_rc_lock()) {
+                    if (g_labels_live_stop_requested) break;
+                    if (g_springboard_rc_ready) {
+                        haveSession = true;
+                        // On wake (screen just turned back on / unlock), the home
+                        // screen was re-rendered with labels; force an immediate
+                        // re-hide + hot burst instead of waiting for the fallback.
+                        if (wasAsleep) { wasAsleep = NO; lastToken = 0; hotTicks = 8; }
+                        // Cheap poll: read the current page identity every tick and
+                        // only do the full label walk when the page changed (a swipe)
+                        // — or every ~1.5s as a fallback for stragglers (e.g. after an
+                        // app closes and its icon view is rebuilt with a label).
+                        uint64_t token = sbcustomizer_current_page_token();
+                        bool changed = (token != lastToken);
+                        // A page change flips the token early in the swipe, before
+                        // all of the new page's icon views are built. Stay "hot" for
+                        // ~800ms after a change so late-instantiating views get their
+                        // labels hidden within a fraction of a second, not at the
+                        // ~1.5s fallback.
+                        if (changed) hotTicks = 8;
+                        if (changed || hotTicks > 0 || tick == 0 || (tick % 15) == 0) {
+                            int hid = sbcustomizer_hide_home_labels_in_session();
+                            if (tick == 0)
+                                printf("[SETTINGS] Hide Labels first tick hid=%d\n", hid);
+                        }
+                        if (hotTicks > 0) hotTicks--;
+                        lastToken = token;
+                    }
+                }
+                if (!haveSession) {
+                    printf("[SETTINGS] Hide Labels loop has no SpringBoard session\n");
+                    if (++failures >= settings_live_failure_limit(3)) break;
+                } else {
+                    failures = 0;
+                }
+                tick++;
+                settings_live_loop_sleep_interruptible(0, kLabelsLiveIntervalUS,
+                                                       &g_labels_live_stop_requested);
+            }
+        } @finally {
+            printf("[SETTINGS] Hide Labels live loop exited ticks=%lu stop=%d\n",
+                   (unsigned long)tick, g_labels_live_stop_requested);
+            __sync_lock_release(&g_labels_live_running);
+        }
+    });
+}
+
+// Re-establish the Hide Labels loop on foreground/become-active, mirroring the
+// other live tweaks (gated on an already-ready SpringBoard session).
+static void settings_apply_labels_once_async(const char *reason)
+{
+    if (!settings_device_supported() || settings_cleanup_in_progress()) return;
+    if (settings_current_ios_major() >= 18) return;
+    NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+    if (![d boolForKey:kSettingsSBCEnabled] || ![d boolForKey:kSettingsSBCHideLabels] ||
+        !g_springboard_rc_ready) return;
+    if (g_labels_live_running) return;
+
+    dispatch_async(dispatch_get_global_queue(0, 0), ^{
+        (void)settings_refresh_screen_awake_state(reason ?: "labels apply");
+        if (!settings_screen_awake_cached()) { settings_start_labels_live_loop(); return; }
+        @synchronized (settings_rc_lock()) {
+            if (settings_cleanup_in_progress() ||
+                ![d boolForKey:kSettingsSBCHideLabels] || !g_springboard_rc_ready) return;
+            int hid = sbcustomizer_hide_home_labels_in_session();
+            printf("[SETTINGS] Hide Labels lifecycle apply%s%s hid=%d\n",
+                   reason ? ": " : "", reason ?: "", hid);
+        }
+        settings_start_labels_live_loop();
+    });
+}
+
 static void settings_apply_statbar_once_async(const char *reason)
 {
     if (!settings_device_supported()) return;
@@ -5408,6 +5551,7 @@ void settings_application_did_enter_background(void)
         ([d boolForKey:kSettingsNiceBarLiteEnabled] && g_springboard_rc_ready) ||
         ([d boolForKey:kSettingsGravityLiteEnabled] && g_springboard_rc_ready) ||
         themerLiveNeeded ||
+        settings_labels_running() ||   // iOS 17 Hide Labels loop needs the app kept alive
         ([d boolForKey:kSettingsLiveWPEnabled]      && g_springboard_rc_ready);
     if (anyLiveLoopNeeded) {
         if ([d boolForKey:kSettingsKeepAlive]) {
@@ -5454,6 +5598,7 @@ void settings_application_will_enter_foreground(void)
     settings_apply_nsbar_once_async("will enter foreground");
     settings_apply_nicebarlite_once_async("will enter foreground");
     settings_apply_axonlite_once_async("will enter foreground");
+    settings_apply_labels_once_async("will enter foreground");
     (void)settings_refresh_screen_awake_state("will enter foreground");
     (void)settings_refresh_screen_lock_state("will enter foreground");
     settings_sync_fastlockx_lite_for_screen_state_async("will enter foreground");
@@ -5470,6 +5615,7 @@ void settings_application_did_become_active(void)
     settings_apply_nsbar_once_async("became active");
     settings_apply_nicebarlite_once_async("became active");
     settings_apply_axonlite_once_async("became active");
+    settings_apply_labels_once_async("became active");
     (void)settings_refresh_screen_awake_state("became active");
     (void)settings_refresh_screen_lock_state("became active");
     settings_sync_fastlockx_lite_for_screen_state_async("became active");
@@ -7251,6 +7397,21 @@ static void settings_run_actions_internal(BOOL pendingOnly)
                         cyanide_upload_log_milestone(ok ? @"layout-extras-applied" : @"layout-extras-warning");
                     }
 
+                    // Hide labels LAST — after HSSCALE's relayout — so our own
+                    // relayout can't re-show them. On iOS 17 label visibility is
+                    // per-SBIconView and recomputed each layout (issue #7); doing
+                    // it here is the only point in the run after the final relayout.
+                    if ([d boolForKey:kSettingsSBCEnabled] && [d boolForKey:kSettingsSBCHideLabels]) {
+                        int nHid = sbcustomizer_hide_home_labels_in_session();
+                        log_user("[OK] Hid labels on %d visible icon view(s).\n", nHid);
+                        // iOS 17: keep a live loop running so pages swiped into view
+                        // get hidden too (their icon views are created lazily with
+                        // labels on). No-op on iOS 18+ (durable config lever).
+                        settings_start_labels_live_loop();
+                    } else {
+                        g_labels_live_stop_requested = 1;
+                        settings_mark_tweak_applied(kSettingsSBCHideLabels, NO);
+                    }
                 }
 
                 if (runStatBar) {

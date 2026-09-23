@@ -424,6 +424,83 @@ static bool auto_add_app_to_dock(uint64_t iconCtrl, int dockIcons, const char *b
     return true;
 }
 
+// Hide the app-name labels on iOS 17. The layout configs expose no label toggle
+// there (issue #7: the provider-level setShowsLabels: works on iOS 18 but is a
+// no-op on 17); the lever is per icon view — SBIconView responds to
+// -setLabelHidden:. Walk every home-screen SBIconView on the main thread (a
+// worker-thread view walk PAC-crashes SpringBoard) and hide its label. Called
+// after the grid/arrange so moved or rebuilt views are covered.
+static int hide_home_icon_labels(uint64_t iconCtrl)
+{
+    uint64_t mgr = try_msg0(iconCtrl, "iconManager");
+    uint64_t rootFolder = try_msg0(mgr, "rootFolderController");
+    if (!r_is_objc_ptr(rootFolder) ||
+        !r_responds(rootFolder, "iconListViewCount") ||
+        !r_responds(rootFolder, "iconListViewAtIndex:")) {
+        printf("[SBC] labels: no list-view accessors\n");
+        return 0;
+    }
+    uint64_t clsIconView = r_class("SBIconView");
+    uint64_t selHidden   = r_sel("setLabelHidden:");
+    uint64_t selIsHidden = r_sel("isLabelHidden");
+    uint64_t selUpdate   = r_sel("_updateLabel");
+    uint64_t selSubs     = r_sel("subviews");
+    uint64_t selCount    = r_sel("count");
+    uint64_t selObjAt    = r_sel("objectAtIndex:");
+    uint64_t selKind     = r_sel("isKindOfClass:");
+    if (!clsIconView || !selHidden) { printf("[SBC] labels: SBIconView/setLabelHidden: missing\n"); return 0; }
+
+    uint64_t pages = r_msg2_main(rootFolder, "iconListViewCount", 0, 0, 0, 0);
+    if (pages > 64) pages = 64;
+    int hidden = 0;
+    for (uint64_t p = 0; p < pages; p++) {
+        uint64_t lv = r_msg2_main(rootFolder, "iconListViewAtIndex:", p, 0, 0, 0);
+        if (!r_is_objc_ptr(lv)) continue;
+        uint64_t subs = r_msg_main(lv, selSubs, 0, 0, 0, 0);
+        if (!subs) continue;
+        r_msg_main(subs, r_sel("retain"), 0, 0, 0, 0);
+        uint64_t n = r_msg_main(subs, selCount, 0, 0, 0, 0);
+        if (n > 512) n = 512;
+        for (uint64_t i = 0; i < n; i++) {
+            uint64_t v = r_msg_main(subs, selObjAt, i, 0, 0, 0);
+            if (!v || !r_msg_main(v, selKind, clsIconView, 0, 0, 0)) continue;
+            if (r_msg_main(v, selIsHidden, 0, 0, 0, 0)) continue;   // already hidden
+            r_msg_main(v, selHidden, 1, 0, 0, 0);
+            r_msg_main(v, selUpdate, 0, 0, 0, 0);
+            hidden++;
+        }
+        r_msg_main(subs, r_sel("release"), 0, 0, 0, 0);
+    }
+    if (hidden) printf("[SBC] labels: hid %d icon view(s)\n", hidden);
+    return hidden;
+}
+
+// Public entry point: resolve the icon controller and hide labels. Called as the
+// LAST home-screen step (after HSSCALE's relayout) so our own relayout can't undo
+// it. Returns the number of icon views hidden.
+int sbcustomizer_hide_home_labels_in_session(void)
+{
+    uint64_t cls = r_class("SBIconController");
+    uint64_t iconCtrl = cls ? r_msg2(cls, "sharedInstance", 0, 0, 0, 0) : 0;
+    if (!r_is_objc_ptr(iconCtrl)) { printf("[SBC] labels: no SBIconController\n"); return 0; }
+    return hide_home_icon_labels(iconCtrl);
+}
+
+// Cheap identity of the currently-shown home-screen page (its SBIconListView
+// pointer). The live loop polls this every tick and only does the full label
+// walk when it changes (a swipe), so it can poll fast without hammering.
+uint64_t sbcustomizer_current_page_token(void)
+{
+    uint64_t cls = r_class("SBIconController");
+    uint64_t iconCtrl = cls ? r_msg2(cls, "sharedInstance", 0, 0, 0, 0) : 0;
+    if (!r_is_objc_ptr(iconCtrl)) return 0;
+    uint64_t mgr = try_msg0(iconCtrl, "iconManager");
+    uint64_t rootFolder = try_msg0(mgr, "rootFolderController");
+    if (!r_is_objc_ptr(rootFolder) || !r_responds_main(rootFolder, "currentIconListView"))
+        return 0;
+    return r_msg2_main(rootFolder, "currentIconListView", 0, 0, 0, 0);
+}
+
 static int patch_homescreen_list_models_v3(uint64_t mgr, int cols, int rows)
 {
     uint64_t rootFolder = try_msg0(mgr, "rootFolderController");
@@ -999,6 +1076,10 @@ bool sbcustomizer_apply_in_session(int dockIcons, int hsCols, int hsRows, bool h
             arrangeOK = arrange_homescreen_pages(
                 iconCtrl, hsCols, firstPageIcons, otherPageIcons);
         }
+        // NOTE: label hiding for iOS 17 is applied as the LAST home-screen step
+        // (after RUN 5 / HSSCALE) via sbcustomizer_hide_home_labels_in_session(),
+        // so our own relayout can't undo it. The provider-config setShowsLabels:
+        // in patch_homescreen_grid still runs (the working lever on iOS 18).
         ok = arrangeOK && dockAppOK;
     } while (0);
 

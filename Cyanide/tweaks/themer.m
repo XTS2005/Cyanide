@@ -2063,11 +2063,46 @@ static uint64_t themer_lookup_model_icon_for_bundle(const char *bundle)
     return found;
 }
 
+// Find the shared SBHIconImageCache (and light/dark appearances) via a visible
+// SBIconView's image view. The cache is keyed by icon, so populating it for an
+// off-screen icon makes that icon render themed the moment its page is shown —
+// no lock/unlock or app-cycle needed (issue #8).
+static uint64_t themer_shared_icon_image_cache(uint64_t *lvs, int nlv)
+{
+    uint64_t iconViewCls = r_class("SBIconView");
+    if (!r_is_objc_ptr(iconViewCls)) return 0;
+    for (int i = 0; i < nlv; i++) {
+        uint64_t subs = r_msg2_main(lvs[i], "subviews", 0, 0, 0, 0);
+        if (!r_is_objc_ptr(subs)) continue;
+        uint64_t n = r_msg2_main(subs, "count", 0, 0, 0, 0);
+        if (n > 512) n = 512;
+        for (uint64_t j = 0; j < n; j++) {
+            uint64_t v = r_msg2_main(subs, "objectAtIndex:", j, 0, 0, 0);
+            if (!r_is_objc_ptr(v) ||
+                !r_msg2_main(v, "isKindOfClass:", iconViewCls, 0, 0, 0)) continue;
+            uint64_t iiv = r_ivar_value(v, "_iconImageView");
+            if (!r_is_objc_ptr(iiv) && r_responds_main(v, "_iconImageView"))
+                iiv = r_msg2_main(v, "_iconImageView", 0, 0, 0, 0);
+            if (!r_is_objc_ptr(iiv)) continue;
+            uint64_t cache = r_responds_main(iiv, "iconImageCache")
+                ? r_msg2_main(iiv, "iconImageCache", 0, 0, 0, 0) : 0;
+            if (r_is_objc_ptr(cache)) return cache;
+        }
+    }
+    return 0;
+}
+
 static int themer_graft_icon_models_for_theme(NSDictionary<NSString *, NSData *> *dataByBundle,
+                                              uint64_t sharedCache,
+                                              uint64_t lightAppearance,
+                                              uint64_t darkAppearance,
                                               int *misses)
 {
     int grafted = 0;
+    int cached = 0;
     int modelMisses = 0;
+    bool canCache = r_is_objc_ptr(sharedCache) &&
+                    r_responds_main(sharedCache, "cacheImage:forIcon:imageAppearance:");
     for (NSString *key in dataByBundle) {
         if (![key isKindOfClass:NSString.class] || key.length == 0) continue;
         const char *bundle = key.UTF8String;
@@ -2108,14 +2143,26 @@ static int themer_graft_icon_models_for_theme(NSDictionary<NSString *, NSData *>
         if (entry && themer_graft_icon_model(icon, image, entry, 0, &changed)) {
             (void)themer_notify_icon_image_changed(icon);
             grafted++;
+            // Populate the shared SBHIconImageCache for this icon (both
+            // appearances) so off-screen pages render themed on first display,
+            // not the stale cached image (issue #8).
+            if (canCache) {
+                if (r_is_objc_ptr(lightAppearance))
+                    r_msg2_main(sharedCache, "cacheImage:forIcon:imageAppearance:",
+                                image, icon, lightAppearance, 0);
+                if (r_is_objc_ptr(darkAppearance))
+                    r_msg2_main(sharedCache, "cacheImage:forIcon:imageAppearance:",
+                                image, icon, darkAppearance, 0);
+                cached++;
+            }
         } else {
             modelMisses++;
         }
     }
 
     if (misses) *misses += modelMisses;
-    printf("[THEMER] model pass grafted=%d misses=%d cache=%d\n",
-           grafted, modelMisses, gThemerCacheCount);
+    printf("[THEMER] model pass grafted=%d cached=%d misses=%d cache=%d\n",
+           grafted, cached, modelMisses, gThemerCacheCount);
     return grafted;
 }
 
@@ -2340,11 +2387,26 @@ bool themer_apply_data_in_session(NSDictionary<NSString *, NSData *> *imageDataB
         return false;
     }
 
+    // Resolve the shared icon-image cache + appearances once so the model pass
+    // can cache every themed icon (all pages), fixing off-screen pages showing
+    // the old icon until a lock/unlock or app-cycle (issue #8).
+    uint64_t sharedCache = themer_shared_icon_image_cache(lvs, nlv);
+    uint64_t appearanceCls2 = r_class("SBHIconImageAppearance");
+    uint64_t lightAppearance2 = (r_is_objc_ptr(appearanceCls2) &&
+                                 r_responds(appearanceCls2, "lightAppearance"))
+        ? r_msg2(appearanceCls2, "lightAppearance", 0, 0, 0, 0) : 0;
+    uint64_t darkAppearance2 = (r_is_objc_ptr(appearanceCls2) &&
+                                r_responds(appearanceCls2, "darkAppearance"))
+        ? r_msg2(appearanceCls2, "darkAppearance", 0, 0, 0, 0) : 0;
+
     int rungHits[4] = {0};
     int misses = 0;
     int modelGrafted = 0;
     if (imageDataByBundle.count <= kThemerBulkModelGraftCap) {
         modelGrafted = themer_graft_icon_models_for_theme(imageDataByBundle,
+                                                          sharedCache,
+                                                          lightAppearance2,
+                                                          darkAppearance2,
                                                           &misses);
     } else {
         printf("[THEMER] model pass deferred for large theme entries=%lu cap=%lu; "
