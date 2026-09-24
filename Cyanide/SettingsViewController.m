@@ -1220,9 +1220,23 @@ static void settings_request_livewp_stop(void) { g_livewp_live_stop_requested = 
 
 static BOOL settings_statbar_running(void) { return g_statbar_live_running != 0; }
 static BOOL settings_labels_running(void) { return g_labels_live_running != 0; }
-// Hide Labels has nothing to actively undo on stop — labels reset on respring,
-// and we simply stop re-hiding. So stop/forget are no-ops.
-static bool settings_stop_labels_registered(BOOL springboardWillDie) { (void)springboardWillDie; return true; }
+// Hide Labels on iOS 17 installs a DURABLE -[SBIconView _shouldShowLabel] hook that
+// is meant to persist after Cyanide closes (that is the whole feature — it behaves
+// like iOS 18's native switch). So termination / session-teardown cleanup must NOT
+// remove it. The only things that clear it: the user turning Hide Labels off (the
+// apply path calls sbcustomizer_restore_home_labels directly) and a respring
+// (SpringBoard drops it on its own). We only stop the fallback live loop here, which
+// is handled by requestStop; there is nothing else to undo.
+static bool settings_stop_labels_registered(BOOL springboardWillDie)
+{
+    (void)springboardWillDie;
+    return true;
+}
+// Nothing to forget on session teardown: whether the durable _shouldShowLabel hook
+// is live is read straight from SpringBoard (authoritative, survives resprings), and
+// the saved original IMP is invalidated there the moment the hook is seen gone. We
+// intentionally keep the saved IMP across a session drop so a later toggle-off can
+// still restore it while the process (and SpringBoard session) live on.
 static void settings_labels_forget_remote_state(void) { }
 static BOOL settings_nsbar_running(void) { return g_nsbar_live_running != 0; }
 static BOOL settings_nicebarlite_running(void) { return g_nicebarlite_live_running != 0; }
@@ -4817,6 +4831,7 @@ static void settings_start_labels_live_loop(void)
 // other live tweaks (gated on an already-ready SpringBoard session).
 static void settings_apply_labels_once_async(const char *reason)
 {
+    (void)reason;
     if (!settings_device_supported() || settings_cleanup_in_progress()) return;
     if (settings_current_ios_major() >= 18) return;
     NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
@@ -4824,17 +4839,25 @@ static void settings_apply_labels_once_async(const char *reason)
         !g_springboard_rc_ready) return;
     if (g_labels_live_running) return;
 
+    // Ask SpringBoard whether the hook is still live. If it is (normal foreground/
+    // unlock, same SpringBoard session), do nothing — it keeps the labels hidden on
+    // its own, and re-writing the method table here is what crashed SpringBoard. Only
+    // when it's genuinely gone (a respring wiped it) do we install it again — exactly
+    // once, the thread-safe swap only, NO live-view walk.
     dispatch_async(dispatch_get_global_queue(0, 0), ^{
-        (void)settings_refresh_screen_awake_state(reason ?: "labels apply");
-        if (!settings_screen_awake_cached()) { settings_start_labels_live_loop(); return; }
+        BOOL ok = NO;
         @synchronized (settings_rc_lock()) {
             if (settings_cleanup_in_progress() ||
                 ![d boolForKey:kSettingsSBCHideLabels] || !g_springboard_rc_ready) return;
-            int hid = sbcustomizer_hide_home_labels_in_session();
-            printf("[SETTINGS] Hide Labels lifecycle apply%s%s hid=%d\n",
-                   reason ? ": " : "", reason ?: "", hid);
+            if (sbcustomizer_home_labels_hook_active()) {
+                ok = YES;   // still installed; leave it alone
+            } else {
+                ok = sbcustomizer_swizzle_home_labels_hidden() != 0;
+                printf("[SETTINGS] Hide Labels re-armed after session drop: durable=%d\n", ok);
+            }
         }
-        settings_start_labels_live_loop();
+        if (ok) settings_mark_tweak_applied(kSettingsSBCHideLabels, YES);
+        else settings_start_labels_live_loop();   // fallback only
     });
 }
 
@@ -7429,14 +7452,26 @@ static void settings_run_actions_internal(BOOL pendingOnly)
                     // per-SBIconView and recomputed each layout (issue #7); doing
                     // it here is the only point in the run after the final relayout.
                     if ([d boolForKey:kSettingsSBCEnabled] && [d boolForKey:kSettingsSBCHideLabels]) {
+                        // iOS 17: durably hide by repointing -[SBIconView
+                        // _shouldShowLabel] at a NO-returning IMP, so every page
+                        // (incl. off-screen ones rebuilt on swipe) drops its labels
+                        // at build time — no live loop, no keep-alive. Fall back to
+                        // the per-view live loop only if the hook can't be installed.
+                        // iOS 18+ uses the durable config lever (no swizzle there).
+                        BOOL legacyLabels = settings_current_ios_major() < 18;
+                        int swizzled = legacyLabels ? sbcustomizer_swizzle_home_labels_hidden() : 0;
                         int nHid = sbcustomizer_hide_home_labels_in_session();
-                        log_user("[OK] Hid labels on %d visible icon view(s).\n", nHid);
-                        // iOS 17: keep a live loop running so pages swiped into view
-                        // get hidden too (their icon views are created lazily with
-                        // labels on). No-op on iOS 18+ (durable config lever).
-                        settings_start_labels_live_loop();
+                        log_user("[OK] Hid labels on %d visible icon view(s)%s.\n",
+                                 nHid, swizzled ? " (durable across pages)" : "");
+                        if (legacyLabels && !swizzled) {
+                            // Hook unavailable — keep the old live loop as a fallback.
+                            settings_start_labels_live_loop();
+                        } else {
+                            settings_mark_tweak_applied(kSettingsSBCHideLabels, YES);
+                        }
                     } else {
                         g_labels_live_stop_requested = 1;
+                        sbcustomizer_restore_home_labels();
                         settings_mark_tweak_applied(kSettingsSBCHideLabels, NO);
                     }
                 }

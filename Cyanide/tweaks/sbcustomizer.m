@@ -486,6 +486,113 @@ int sbcustomizer_hide_home_labels_in_session(void)
     return hide_home_icon_labels(iconCtrl);
 }
 
+// Durable iOS 17 Hide Labels: instead of chasing per-view setLabelHidden: with a
+// live loop, repoint -[SBIconView _shouldShowLabel] at -[NSObject isProxy] (which
+// returns NO) via a remote method_setImplementation. Every icon view then computes
+// "no label" at build time — including off-screen pages when they are lazily
+// rebuilt on a swipe — so labels stay hidden across swipes and lock/unlock with no
+// polling and no keep-alive. method_setImplementation runs inside SpringBoard so it
+// signs the new IMP (PAC) itself, and isProxy is a real in-image function, so there
+// is no gadget to hunt or pointer to forge. The original IMP is saved so the toggle
+// can restore it (a respring also clears it). Same technique as the iOS 17 App
+// Library disable (ds_force_method_zero in darksword_tweaks.m).
+// The genuine original -[SBIconView _shouldShowLabel] IMP, captured when WE install
+// the hook, so an explicit toggle-off can put it back. Only valid within the same
+// SpringBoard session that installed it; a respring makes it stale, so it is dropped
+// as soon as we observe the hook is no longer live (see the hook-active check).
+static uint64_t g_labels_shouldshow_old_imp = 0;
+
+// Resolve the pieces once. Returns 0 (and leaves outs untouched) if unavailable
+// (e.g. no live SpringBoard session yet).
+static int labels_resolve_hook(uint64_t *methodOut, uint64_t *falseIMPOut)
+{
+    uint64_t clsIconView  = r_class("SBIconView");
+    uint64_t selShouldShow = r_sel("_shouldShowLabel");
+    uint64_t NSObject     = r_class("NSObject");
+    uint64_t selFalse     = r_sel("isProxy");   // -(BOOL)isProxy => NO
+    if (!r_is_objc_ptr(clsIconView) || !selShouldShow ||
+        !r_is_objc_ptr(NSObject) || !selFalse) return 0;
+    uint64_t method = r_dlsym_call(R_TIMEOUT, "class_getInstanceMethod",
+                                   clsIconView, selShouldShow, 0, 0, 0, 0, 0, 0);
+    uint64_t falseMethod = r_dlsym_call(R_TIMEOUT, "class_getInstanceMethod",
+                                        NSObject, selFalse, 0, 0, 0, 0, 0, 0);
+    uint64_t falseIMP = falseMethod
+        ? r_dlsym_call(R_TIMEOUT, "method_getImplementation",
+                       falseMethod, 0, 0, 0, 0, 0, 0, 0)
+        : 0;
+    if (!method || !falseIMP) return 0;
+    if (methodOut)   *methodOut = method;
+    if (falseIMPOut) *falseIMPOut = falseIMP;
+    return 1;
+}
+
+// Authoritative: read SpringBoard's LIVE _shouldShowLabel IMP and compare it to
+// isProxy's. This is the truth (the hook lives in SpringBoard's method table, not in
+// our process), so it correctly reports "gone" after a respring even though our
+// process is still running. Needs a live session; returns 0 if it can't check.
+int sbcustomizer_home_labels_hook_active(void)
+{
+    uint64_t method = 0, falseIMP = 0;
+    if (!labels_resolve_hook(&method, &falseIMP)) return 0;
+    uint64_t curIMP = r_dlsym_call(R_TIMEOUT, "method_getImplementation",
+                                   method, 0, 0, 0, 0, 0, 0, 0);
+    int active = (curIMP && curIMP == falseIMP) ? 1 : 0;
+    // If the hook is gone (respring), any saved "original" is from a dead session
+    // and must not be used to restore — drop it.
+    if (!active) g_labels_shouldshow_old_imp = 0;
+    return active;
+}
+
+// Drop our saved-original record WITHOUT touching SpringBoard. Used when the session
+// died; the hook (if any) stays in SpringBoard and is re-detected authoritatively.
+void sbcustomizer_forget_home_labels_hook_state(void)
+{
+    g_labels_shouldshow_old_imp = 0;
+}
+
+int sbcustomizer_swizzle_home_labels_hidden(void)
+{
+    uint64_t method = 0, falseIMP = 0;
+    if (!labels_resolve_hook(&method, &falseIMP)) {
+        printf("[SBC] labels: hook unavailable (no session or selector missing)\n");
+        return 0;
+    }
+    // Idempotent against the LIVE method table: if _shouldShowLabel already points at
+    // our NO-IMP, do NOT rewrite it. Re-writing the table (with its cache flush) while
+    // SpringBoard animates icons races with concurrent objc_msgSend on its worker
+    // threads and can branch through a half-updated IMP -> crash. So we only ever
+    // write when the hook is genuinely absent (first apply, or after a respring).
+    uint64_t curIMP = r_dlsym_call(R_TIMEOUT, "method_getImplementation",
+                                   method, 0, 0, 0, 0, 0, 0, 0);
+    if (curIMP == falseIMP) {
+        printf("[SBC] labels: _shouldShowLabel already hooked; leaving as-is\n");
+        return 1;
+    }
+    uint64_t oldIMP = r_dlsym_call(R_TIMEOUT, "method_setImplementation",
+                                   method, falseIMP, 0, 0, 0, 0, 0, 0);
+    if (oldIMP && oldIMP != falseIMP) g_labels_shouldshow_old_imp = oldIMP;
+    printf("[SBC] labels: swizzled SBIconView._shouldShowLabel -> NO oldIMP=0x%llx\n",
+           oldIMP);
+    return oldIMP != 0;
+}
+
+int sbcustomizer_restore_home_labels(void)
+{
+    if (!g_labels_shouldshow_old_imp) return 0;   // nothing we can safely restore
+    uint64_t method = 0, falseIMP = 0;
+    if (!labels_resolve_hook(&method, &falseIMP)) return 0;
+    // Only restore if OUR hook is still the current IMP; otherwise a respring already
+    // cleared it and the saved pointer is stale.
+    uint64_t curIMP = r_dlsym_call(R_TIMEOUT, "method_getImplementation",
+                                   method, 0, 0, 0, 0, 0, 0, 0);
+    if (curIMP != falseIMP) { g_labels_shouldshow_old_imp = 0; return 0; }
+    r_dlsym_call(R_TIMEOUT, "method_setImplementation",
+                 method, g_labels_shouldshow_old_imp, 0, 0, 0, 0, 0, 0);
+    printf("[SBC] labels: restored SBIconView._shouldShowLabel\n");
+    g_labels_shouldshow_old_imp = 0;
+    return 1;
+}
+
 // Cheap identity of the currently-shown home-screen page (its SBIconListView
 // pointer). The live loop polls this every tick and only does the full label
 // walk when it changes (a swipe), so it can poll fast without hammering.
