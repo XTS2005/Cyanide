@@ -1515,6 +1515,12 @@ static const useconds_t kThemerSnowBoardLiteSlowBackgroundIntervalUS = 30000000;
 static const NSUInteger kThemerSnowBoardLiteInitialVisibleTicks = 3;
 static const NSUInteger kThemerLiveMaxTicks = 86400;
 static const NSUInteger kThemerLegacyLiveMaxTicks = 1;
+// iOS <26: instead of theming once and exiting (which left off-screen pages
+// unthemed until an app-cycle/unlock — issue #8), run a lightweight page-follow:
+// poll a cheap current-page identity and only re-theme the visible page when it
+// changes (a swipe), so each page themes as you swipe to it.
+static const NSUInteger kThemerLegacyPageMaxTicks = 200000;
+static const useconds_t kThemerLegacyPagePollUS   = 300000;   // 300ms cheap probe
 static const useconds_t kThemerRepairInitialDelayUS = 900000;
 static const useconds_t kThemerRepairIntervalUS = 450000;
 static NSString * const kSettingsRemoteCallStateDidChangeNotification = @"SettingsRemoteCallStateDidChangeNotification";
@@ -5336,9 +5342,12 @@ static void settings_start_themer_live_loop(void)
         NSUInteger tick = 0;
         NSUInteger failures = 0;
         NSInteger iosMajor = [[NSProcessInfo processInfo] operatingSystemVersion].majorVersion;
-        NSUInteger maxTicks = (iosMajor > 0 && iosMajor < 26)
-            ? kThemerLegacyLiveMaxTicks
+        BOOL legacyPageMode = (iosMajor > 0 && iosMajor < 26);
+        NSUInteger maxTicks = legacyPageMode
+            ? kThemerLegacyPageMaxTicks
             : kThemerLiveMaxTicks;
+        uint64_t lastPageToken = 0;   // legacy page-follow: re-theme on page change
+        NSUInteger hotTicks = 0;      // brief burst after a swipe for late-built views
 
         printf("[SETTINGS] Themer dynamic live loop started interval=%uus background=%uus sblSlow=%uus/%uus max=%lu iosMajor=%ld\n",
                kThemerLiveIntervalUS,
@@ -5352,7 +5361,8 @@ static void settings_start_themer_live_loop(void)
             // Start with a sleep so we don't pile a tick on top of the
             // initial Run apply that just completed.
             settings_live_loop_sleep_interruptible(0,
-                                                   settings_themer_live_interval_for_tick(d, tick),
+                                                   legacyPageMode ? kThemerLegacyPagePollUS
+                                                                  : settings_themer_live_interval_for_tick(d, tick),
                                                    &g_themer_live_stop_requested);
             while (settings_icon_theme_live_repair_enabled(d) &&
                    !settings_themer_dynamic_updates_blocked_by_stage(d) &&
@@ -5373,7 +5383,22 @@ static void settings_start_themer_live_loop(void)
                             failures++;
                             break;
                         }
-                        if (repairVisibleIcons) {
+                        if (legacyPageMode) {
+                            // Cheap page-change poll: only re-theme the visible page
+                            // when the current page changed (a swipe), plus a brief
+                            // burst after and an occasional fallback. Idle ticks just
+                            // read the page token, so a 300ms poll stays light.
+                            uint64_t token = sbcustomizer_current_page_token();
+                            if (token != lastPageToken) hotTicks = 5;
+                            if (token != lastPageToken || tick == 0 || hotTicks > 0 ||
+                                (tick % 40) == 0) {
+                                ok = themer_repaint_visible_theme_views_in_session();
+                            } else {
+                                ok = true;
+                            }
+                            if (hotTicks > 0) hotTicks--;
+                            lastPageToken = token;
+                        } else if (repairVisibleIcons) {
                             ok = themer_repaint_visible_theme_views_in_session();
                         } else {
                             ok = themer_repaint_dynamic_cached_views_in_session();
@@ -5392,7 +5417,9 @@ static void settings_start_themer_live_loop(void)
                     g_themer_live_stop_requested ||
                     tick >= maxTicks) break;
 
-                useconds_t intervalUS = settings_themer_live_interval_for_tick(d, tick);
+                useconds_t intervalUS = legacyPageMode
+                    ? kThemerLegacyPagePollUS
+                    : settings_themer_live_interval_for_tick(d, tick);
                 settings_live_loop_sleep_interruptible(0, intervalUS,
                                                        &g_themer_live_stop_requested);
             }
