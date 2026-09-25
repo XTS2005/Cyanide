@@ -1368,14 +1368,20 @@ static void settings_each_springboard_cleanup_entry(void (^block)(const Settings
     // termination cleanup, live-loop waits, and applied-state reset stay in sync.
     const SettingsSpringBoardTweakCleanupEntry entries[] = {
         { kSettingsStatBarEnabled, "StatBar", settings_request_statbar_stop, settings_stop_statbar_registered, statbar_forget_remote_state, settings_statbar_running, YES, YES },
-        // keepsSpringBoardSession = NO: Hide Labels is durable on its own now
-        // (iOS 17 _shouldShowLabel swizzle, iOS 18 config lever) and does NOT need
-        // the SpringBoard RemoteCall session to persist. Keeping it alive left our
-        // synthetic hijacked thread lingering in SpringBoard, and tearing it down
-        // later (on app close, or while idle) crashed SpringBoard (respring, 0x401).
-        // With NO, the session is released cleanly at session-end — right after the
-        // run, while SpringBoard is calm — which does not undo the label patch.
-        { kSettingsSBCHideLabels, "Hide Labels", settings_request_labels_stop, settings_stop_labels_registered, settings_labels_forget_remote_state, settings_labels_running, YES, NO },
+        // BOTH flags NO: Hide Labels is durable on its own (iOS 17 _shouldShowLabel
+        // swizzle, iOS 18 config lever) and does NOT need the SpringBoard RemoteCall
+        // session — nor termination cleanup — to persist. Either flag being YES makes
+        // settings_has_persistent_springboard_remote_call_user() report a persistent
+        // user (cleanupOnTermination feeds settings_has_active_termination_live_tweak,
+        // checked first), which pins the session open and blocks KRW idle-detach. That
+        // left our synthetic hijacked thread alive and the KRW filter under our
+        // control across lock/unlock, and the teardown on close (or an inbound icmp6
+        // packet against a badly-aimed parked filter) crashed SpringBoard (0x401).
+        // With BOTH NO, a Hide Labels run releases the session and hands KRW to
+        // launchd at session-end — exactly like a no-labels run — which does not undo
+        // the label patch. The fallback live loop, if it ever runs, still holds the
+        // session via settings_any_registered_live_loop_running().
+        { kSettingsSBCHideLabels, "Hide Labels", settings_request_labels_stop, settings_stop_labels_registered, settings_labels_forget_remote_state, settings_labels_running, NO, NO },
         { kSettingsNSBarEnabled, "NSBar", settings_request_nsbar_stop, settings_stop_nsbar_registered, nsbar_forget_remote_state, settings_nsbar_running, YES, YES },
         { kSettingsNiceBarLiteEnabled, "NiceBar Lite", settings_request_nicebarlite_stop, settings_stop_nicebarlite_registered, nicebarlite_forget_remote_state, settings_nicebarlite_running, YES, YES },
         { kSettingsAxonLiteEnabled, "Axon Lite", settings_request_axonlite_stop, settings_stop_axonlite_registered, axonlite_forget_remote_state, settings_axonlite_running, YES, YES },
