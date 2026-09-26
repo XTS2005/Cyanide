@@ -10,6 +10,7 @@
 #import "../LogTextView.h"
 
 #import <Foundation/Foundation.h>
+#import <UIKit/UIKit.h>
 #import <math.h>
 #import <stdio.h>
 #import <stdlib.h>
@@ -36,12 +37,38 @@ typedef struct {
     double h;
 } GL_CGRect;
 
+typedef struct {
+    double x;
+    double y;
+} GL_CGPoint;
+
 // Gravity behavior cache. 16 slots: home page (1) + dock (1) is the
 // common case, extra headroom covers multi-page captures and future
 // expansion. Overflow is logged, not silently dropped.
+//
+// Each slot also keeps the item behavior and the item array of the same
+// group: the tilt update writes through the gravity behavior, and the speed
+// clamp needs the other two.
 #define GRAVITY_MAX_BEHAVIORS 16
 static uint64_t s_gravity_ptrs[GRAVITY_MAX_BEHAVIORS];
+static uint64_t s_gravity_itemBehaviors[GRAVITY_MAX_BEHAVIORS];
+static uint64_t s_gravity_itemArrays[GRAVITY_MAX_BEHAVIORS];
 static volatile int s_gravity_ptr_count = 0;
+
+// Physics floors. The app-side settings register no defaults for these keys,
+// so an untouched install arrives with bounce, friction, resistance and
+// angularResistance all zero -- a no-damping free fall in which icons
+// accelerate without limit and spin forever. The floors keep the motion
+// readable, and together with the speed clamp they keep icons inside the
+// icon list view instead of off the screen.
+static const double kGravityMinElasticity = 0.2;
+static const double kGravityMinResistance = 0.12;
+static const double kGravityMinAngularResistance = 0.5;
+// Past roughly one icon-width per frame an icon can slip through the collision
+// boundary between two physics steps instead of bouncing off it. A field log
+// with the old (undamped) settings had nine of eleven icons outside the list
+// view; 1800 pt/s leaves ~30 pt per frame at 60 fps.
+static const double kGravityMaxItemSpeed = 1800.0;   // pt/s
 
 static GravityLiteConfig s_gravity_last_config;
 static volatile int s_gravity_last_config_valid = 0;
@@ -384,14 +411,27 @@ static int gl_attach_behaviors(uint64_t animator, uint64_t items, GravityLiteCon
     // Item behavior: elasticity, friction, density, resistance, rotation.
     uint64_t itemBehavior = gl_alloc_init_with_items("UIDynamicItemBehavior", items);
     if (r_is_objc_ptr(itemBehavior)) {
-        gl_set_double(itemBehavior, "setElasticity:", config.bounce);
+        // Floors: an untouched install leaves all of these at 0 (the app side
+        // registers no defaults), which made icons accelerate forever and spin
+        // without ever stopping. A little elasticity is what makes them read
+        // as solid objects instead of sliding along the edges.
+        double elasticity = config.bounce;
+        if (elasticity < kGravityMinElasticity) elasticity = kGravityMinElasticity;
+        if (elasticity > 1.0) elasticity = 1.0;
+        gl_set_double(itemBehavior, "setElasticity:", elasticity);
         gl_set_double(itemBehavior, "setFriction:", config.friction);
         gl_set_double(itemBehavior, "setDensity:", 1.0);
         // (6) Minimum damping so icons eventually stop.
         double res = config.resistance;
-        if (res < 0.05) res = 0.05;
+        if (res < kGravityMinResistance) res = kGravityMinResistance;
         gl_set_double(itemBehavior, "setResistance:", res);
-        gl_set_double(itemBehavior, "setAngularResistance:", config.angularResistance);
+        // Angular damping: allowsRotation is hardcoded true on the app side, so
+        // a zero here means an icon that starts spinning never stops.
+        double angularResistance = config.angularResistance;
+        if (angularResistance < kGravityMinAngularResistance) {
+            angularResistance = kGravityMinAngularResistance;
+        }
+        gl_set_double(itemBehavior, "setAngularResistance:", angularResistance);
         gl_set_bool(itemBehavior, "setAllowsRotation:", config.allowsRotation);
         r_msg2_main(animator, "addBehavior:", itemBehavior, 0, 0, 0);
         attached++;
@@ -606,6 +646,8 @@ bool gravitylite_stop_in_session(void)
 
     __atomic_store_n(&s_gravity_ptr_count, 0, __ATOMIC_SEQ_CST);
     memset(s_gravity_ptrs, 0, sizeof(s_gravity_ptrs));
+    memset(s_gravity_itemBehaviors, 0, sizeof(s_gravity_itemBehaviors));
+    memset(s_gravity_itemArrays, 0, sizeof(s_gravity_itemArrays));
 
     uint64_t ctrl = gl_icon_controller();
     if (!r_is_objc_ptr(ctrl)) {
@@ -865,6 +907,43 @@ bool gravitylite_explosion_in_session(double force)
     return pulses > 0;
 }
 
+// Caps each icon's linear velocity. UIDynamicItemBehavior has no public speed
+// limit, so the only lever is to read the current velocity and add the
+// difference back. Runs on the tilt thread with the behavior cache held.
+static void gl_clamp_item_speeds(uint64_t itemBehavior, uint64_t items)
+{
+    if (!r_is_objc_ptr(itemBehavior) || !r_is_objc_ptr(items)) return;
+    if (!r_responds_main(itemBehavior, "linearVelocityForItem:")) return;
+    if (!r_responds_main(itemBehavior, "addLinearVelocity:forItem:")) return;
+
+    uint64_t n = gl_array_count(items);
+    if (n > 256) n = 256;
+    for (uint64_t i = 0; i < n; i++) {
+        uint64_t item = gl_array_object(items, i);
+        if (!r_is_objc_ptr(item)) continue;
+
+        GL_CGPoint velocity = {0};
+        if (!r_msg2_main_struct_ret(itemBehavior, "linearVelocityForItem:",
+                                    &velocity, sizeof(velocity),
+                                    &item, sizeof(item),
+                                    NULL, 0, NULL, 0, NULL, 0)) {
+            continue;
+        }
+        double speed = hypot(velocity.x, velocity.y);
+        if (!(speed > kGravityMaxItemSpeed)) continue;
+
+        double scale = kGravityMaxItemSpeed / speed;
+        GL_CGPoint delta = {
+            .x = velocity.x * (scale - 1.0),
+            .y = velocity.y * (scale - 1.0),
+        };
+        r_msg2_main_raw(itemBehavior, "addLinearVelocity:forItem:",
+                        &delta, sizeof(delta),
+                        &item, sizeof(item),
+                        NULL, 0, NULL, 0);
+    }
+}
+
 bool gravitylite_update_gravity_angle_in_session(double angle, double magnitude)
 {
     if (__atomic_load_n(&s_gravity_ptr_count, __ATOMIC_RELAXED) == 0) {
@@ -907,6 +986,18 @@ bool gravitylite_update_gravity_angle_in_session(double angle, double magnitude)
         gl_set_double(gb, "setAngle:", angle);
         gl_set_double(gb, "setMagnitude:", magnitude);
     }
+
+    // Cap item speeds every other sample (~4 Hz at the 120 ms tick). Gravity
+    // keeps adding speed, and past one icon-width per frame the collision
+    // boundary gets crossed between two physics steps and the icon leaves the
+    // screen instead of bouncing. Each clamp is a read per icon plus a write
+    // only when one is over the cap, so it is not worth doing every sample.
+    static volatile int clamp_tick = 0;
+    if (__atomic_add_fetch(&clamp_tick, 1, __ATOMIC_RELAXED) % 2 == 0) {
+        for (int i = 0; i < count; i++) {
+            gl_clamp_item_speeds(s_gravity_itemBehaviors[i], s_gravity_itemArrays[i]);
+        }
+    }
     pthread_mutex_unlock(&s_gravity_refresh_mutex);
 
     // Feed the recovery poller: the icons have just been pushed around, so
@@ -941,6 +1032,8 @@ void gravitylite_forget_remote_state(void)
     pthread_mutex_lock(&s_gravity_refresh_mutex);
     __atomic_store_n(&s_gravity_ptr_count, 0, __ATOMIC_SEQ_CST);
     memset(s_gravity_ptrs, 0, sizeof(s_gravity_ptrs));
+    memset(s_gravity_itemBehaviors, 0, sizeof(s_gravity_itemBehaviors));
+    memset(s_gravity_itemArrays, 0, sizeof(s_gravity_itemArrays));
     pthread_mutex_unlock(&s_gravity_refresh_mutex);
 }
 
@@ -996,26 +1089,45 @@ static int gl_restore_group_to_grid(uint64_t group)
 {
     if (!r_is_objc_ptr(group)) return 0;
 
-    uint64_t icons      = gl_dict_get(group, s_key_icons);
-    uint64_t liveFrames = gl_dict_get(group, s_key_liveFrames);
-    if (!r_is_objc_ptr(icons) || !r_is_objc_ptr(liveFrames)) return 0;
+    uint64_t icons    = gl_dict_get(group, s_key_icons);
+    uint64_t listView = gl_dict_get(group, s_key_listView);
+    if (!r_is_objc_ptr(icons)) return 0;
 
     uint64_t n = gl_array_count(icons);
-    uint64_t fn = gl_array_count(liveFrames);
-    if (n > fn) n = fn;
     if (n > 256) n = 256;
 
     int restored = 0;
+    for (uint64_t j = 0; j < n; j++) {
+        uint64_t icon = gl_array_object(icons, j);
+        if (!r_is_objc_ptr(icon)) continue;
+        gl_reset_transform(icon);
+        restored++;
+    }
+
+    // Let SpringBoard place them rather than writing frames ourselves. The
+    // original Gravity tweak does exactly this (setIconsNeedLayout +
+    // layoutIconsIfNeeded:domino:) and it is the difference between a 0.2s
+    // settle and an icon visibly teleporting: SBIconListView owns the grid,
+    // while our captured frames only record wherever an icon happened to be
+    // when the group was built.
+    if (r_is_objc_ptr(listView)) {
+        gl_layout_list_view(listView);
+        return restored;
+    }
+
+    // No list view recorded (should not happen): fall back to the captured
+    // frames so the icons are at least not left mid-air.
+    uint64_t liveFrames = gl_dict_get(group, s_key_liveFrames);
+    if (!r_is_objc_ptr(liveFrames)) return restored;
+    uint64_t fn = gl_array_count(liveFrames);
+    if (n > fn) n = fn;
     for (uint64_t j = 0; j < n; j++) {
         uint64_t icon = gl_array_object(icons, j);
         GL_CGRect homeFrame;
         if (!r_is_objc_ptr(icon)) continue;
         if (!gl_rect_from_value(gl_array_object(liveFrames, j), &homeFrame)) continue;
         if (!gl_rect_valid(homeFrame)) continue;
-
-        gl_reset_transform(icon);
         gl_set_rect(icon, "setFrame:", homeFrame);
-        restored++;
     }
     return restored;
 }
@@ -1274,6 +1386,137 @@ static void gravitylite_install_lock_observer(void)
     }
 }
 
+// ---------------------------------------------------- app state observers ---
+
+// Toggles the group's gravity behavior. Collision and item behaviors are left
+// alone: they do nothing once nothing is pulling the icons, and re-arming
+// gravity is exactly what gl_refresh_gravity_ptrs() already does on the way
+// back from the background.
+static void gl_set_group_gravity_active(uint64_t group, bool active)
+{
+    uint64_t animator = gl_dict_get(group, s_key_animator);
+    if (!r_is_objc_ptr(animator)) return;
+
+    uint64_t gravityCls = r_class("UIGravityBehavior");
+    if (!r_is_objc_ptr(gravityCls)) return;
+
+    uint64_t behaviors = gl_safe_msg(animator, "behaviors", 0, 0, 0, 0);
+    uint64_t bn = gl_array_count(behaviors);
+    if (bn > 64) bn = 64;
+    for (uint64_t j = 0; j < bn; j++) {
+        uint64_t behavior = gl_array_object(behaviors, j);
+        if (!r_is_objc_ptr(behavior)) continue;
+        if (!(r_msg2(behavior, "isKindOfClass:", gravityCls, 0, 0, 0) & 0xff)) continue;
+        gl_set_bool(behavior, "setActive:", active);
+    }
+}
+
+// Pauses or re-arms the gravity of every installed group. Used by the recovery
+// poller while SpringBoard is running a transition of its own.
+static int gl_set_all_groups_gravity_active(bool active)
+{
+    uint64_t ctrl = gl_icon_controller();
+    uint64_t state = r_is_objc_ptr(ctrl) ? gl_get_state(ctrl) : 0;
+    if (!r_is_objc_ptr(state)) return 0;
+
+    uint64_t groups = gl_dict_get(state, s_key_groups);
+    uint64_t count = gl_array_count(groups);
+    if (count > 64) count = 64;
+
+    int touched = 0;
+    for (uint64_t i = 0; i < count; i++) {
+        uint64_t group = gl_array_object(groups, i);
+        if (!r_is_objc_ptr(group)) continue;
+        gl_set_group_gravity_active(group, active);
+        touched++;
+    }
+    return touched;
+}
+
+// Puts every icon back on its recorded grid frame and parks the gravity
+// behaviors. Runs while Cyanide is leaving the foreground, so it signals both
+// worker loops first (cheap), does the RemoteCall work, and lets a background
+// queue do the joins -- the same shape as gravitylite_stop_in_session().
+static void gravitylite_park_physics_and_restore_icons(void)
+{
+    __atomic_store_n(&s_tilt_running, 0, __ATOMIC_SEQ_CST);
+    __atomic_store_n(&s_poller_running, 0, __ATOMIC_SEQ_CST);
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        gl_tilt_stop();
+        gl_poller_stop();
+    });
+
+    uint64_t ctrl = gl_icon_controller();
+    uint64_t state = r_is_objc_ptr(ctrl) ? gl_get_state(ctrl) : 0;
+    if (!r_is_objc_ptr(state)) {
+        printf("[GRAVITY] backgrounded: no state to park\n");
+        return;
+    }
+
+    uint64_t groups = gl_dict_get(state, s_key_groups);
+    uint64_t count = gl_array_count(groups);
+    if (count > 64) count = 64;
+
+    int restored = 0;
+    for (uint64_t i = 0; i < count; i++) {
+        uint64_t group = gl_array_object(groups, i);
+        if (!r_is_objc_ptr(group)) continue;
+        // Park first: laying the list view out while gravity is still active
+        // would just let it drag the icons off the grid again.
+        gl_set_group_gravity_active(group, false);
+        restored += gl_restore_group_to_grid(group);
+    }
+    printf("[GRAVITY] backgrounded: physics parked, %d icon(s) back on the grid\n",
+           restored);
+}
+
+// Cyanide is leaving the foreground. SpringBoard keeps running the physics we
+// installed, and while we are away the home screen is exactly what the user is
+// looking at: the angle updates and the recovery poller's setFrame/setTransform
+// calls were fighting SpringBoard's own animations, which is what made icons
+// twitch and teleport during the App-close animation and the folder open/close
+// transitions. Park the physics and put the icons back on the grid instead; the
+// notify path re-arms everything when we come back. This is also what keeps a
+// force-quit from leaving icons falling with nobody left to catch them.
+static void gravitylite_app_did_enter_background(void)
+{
+    if (!__atomic_load_n(&s_gravity_active, __ATOMIC_SEQ_CST)) return;
+    gravitylite_park_physics_and_restore_icons();
+}
+
+static void gravitylite_app_did_become_active(void)
+{
+    if (!__atomic_load_n(&s_gravity_active, __ATOMIC_SEQ_CST)) return;
+    if (!gravitylite_display_is_unlocked() || !gravitylite_display_is_awake()) return;
+
+    // gl_tilt_start() re-runs gl_refresh_gravity_ptrs(), which flips the parked
+    // gravity behaviors back to active.
+    gl_tilt_start(s_gravity_last_config.magnitude);
+    gl_poller_start();
+}
+
+static void gravitylite_install_app_foreground_observers(void)
+{
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        NSNotificationCenter *center = [NSNotificationCenter defaultCenter];
+        [center addObserverForName:UIApplicationDidEnterBackgroundNotification
+                            object:nil
+                             queue:nil
+                        usingBlock:^(NSNotification *note) {
+            (void)note;
+            gravitylite_app_did_enter_background();
+        }];
+        [center addObserverForName:UIApplicationDidBecomeActiveNotification
+                            object:nil
+                             queue:nil
+                        usingBlock:^(NSNotification *note) {
+            (void)note;
+            gravitylite_app_did_become_active();
+        }];
+    });
+}
+
 static bool gravitylite_finish_apply(GravityLiteConfig config)
 {
     s_gravity_last_config = config;
@@ -1284,6 +1527,7 @@ static bool gravitylite_finish_apply(GravityLiteConfig config)
     // (3) Mark recover needed on apply.
     __atomic_store_n(&s_recover_needed, 1, __ATOMIC_SEQ_CST);
     gravitylite_install_lock_observer();
+    gravitylite_install_app_foreground_observers();
 
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
@@ -1303,12 +1547,15 @@ static bool gravitylite_finish_apply(GravityLiteConfig config)
 static void gl_refresh_gravity_ptrs(void)
 {
     uint64_t local_ptrs[GRAVITY_MAX_BEHAVIORS] = {0};
+    uint64_t local_itemBehaviors[GRAVITY_MAX_BEHAVIORS] = {0};
+    uint64_t local_items[GRAVITY_MAX_BEHAVIORS] = {0};
     int local_count = 0;
 
     uint64_t ctrl = gl_icon_controller();
     uint64_t state = r_is_objc_ptr(ctrl) ? gl_get_state(ctrl) : 0;
     if (r_is_objc_ptr(state)) {
         uint64_t gravityCls = r_class("UIGravityBehavior");
+        uint64_t itemBehaviorCls = r_class("UIDynamicItemBehavior");
         if (r_is_objc_ptr(gravityCls)) {
             uint64_t groups = gl_dict_get(state, s_key_groups);
             uint64_t count = gl_array_count(groups);
@@ -1323,23 +1570,40 @@ static void gl_refresh_gravity_ptrs(void)
                 uint64_t behaviors = gl_safe_msg(animator, "behaviors", 0, 0, 0, 0);
                 uint64_t bn = gl_array_count(behaviors);
                 if (bn > 64) bn = 64;
-                for (uint64_t j = 0; j < bn && local_count < GRAVITY_MAX_BEHAVIORS; j++) {
+
+                // One gravity behavior and one item behavior per group. The
+                // item behavior is what the speed clamp reads and writes.
+                uint64_t gravityBehavior = 0;
+                uint64_t itemBehavior = 0;
+                for (uint64_t j = 0; j < bn; j++) {
                     uint64_t behavior = gl_array_object(behaviors, j);
                     if (!r_is_objc_ptr(behavior)) continue;
-                    if (!(r_msg2(behavior, "isKindOfClass:", gravityCls, 0, 0, 0) & 0xff)) continue;
-
-                    gl_set_bool(behavior, "setActive:", true);
-                    uint64_t n = gl_array_count(items);
-                    if (n > 256) n = 256;
-                    for (uint64_t k = 0; k < n; k++) {
-                        uint64_t item = gl_array_object(items, k);
-                        if (r_is_objc_ptr(item)) {
-                            r_msg2_main(behavior, "addItem:", item, 0, 0, 0);
-                        }
+                    if (!gravityBehavior &&
+                        (r_msg2(behavior, "isKindOfClass:", gravityCls, 0, 0, 0) & 0xff)) {
+                        gravityBehavior = behavior;
+                        continue;
                     }
-
-                    local_ptrs[local_count++] = behavior;
+                    if (!itemBehavior && r_is_objc_ptr(itemBehaviorCls) &&
+                        (r_msg2(behavior, "isKindOfClass:", itemBehaviorCls, 0, 0, 0) & 0xff)) {
+                        itemBehavior = behavior;
+                    }
                 }
+                if (!r_is_objc_ptr(gravityBehavior)) continue;
+
+                gl_set_bool(gravityBehavior, "setActive:", true);
+                uint64_t n = gl_array_count(items);
+                if (n > 256) n = 256;
+                for (uint64_t k = 0; k < n; k++) {
+                    uint64_t item = gl_array_object(items, k);
+                    if (r_is_objc_ptr(item)) {
+                        r_msg2_main(gravityBehavior, "addItem:", item, 0, 0, 0);
+                    }
+                }
+
+                local_ptrs[local_count] = gravityBehavior;
+                local_itemBehaviors[local_count] = itemBehavior;
+                local_items[local_count] = items;
+                local_count++;
             }
         }
     }
@@ -1347,9 +1611,13 @@ static void gl_refresh_gravity_ptrs(void)
     pthread_mutex_lock(&s_gravity_refresh_mutex);
     __atomic_store_n(&s_gravity_ptr_count, 0, __ATOMIC_SEQ_CST);
     memset(s_gravity_ptrs, 0, sizeof(s_gravity_ptrs));
+    memset(s_gravity_itemBehaviors, 0, sizeof(s_gravity_itemBehaviors));
+    memset(s_gravity_itemArrays, 0, sizeof(s_gravity_itemArrays));
     int capped = local_count > GRAVITY_MAX_BEHAVIORS ? GRAVITY_MAX_BEHAVIORS : local_count;
     for (int i = 0; i < capped; i++) {
         s_gravity_ptrs[i] = local_ptrs[i];
+        s_gravity_itemBehaviors[i] = local_itemBehaviors[i];
+        s_gravity_itemArrays[i] = local_items[i];
     }
     __atomic_store_n(&s_gravity_ptr_count, capped, __ATOMIC_SEQ_CST);
     pthread_mutex_unlock(&s_gravity_refresh_mutex);
@@ -1533,28 +1801,58 @@ static void *gl_poller_thread_main(void *arg)
 {
     (void)arg;
     int tick = 0;
+    int lastPageIndex = -9999;
+    bool parkedForTransition = false;
+
     while (__atomic_load_n(&s_poller_running, __ATOMIC_RELAXED)) {
         uint32_t oldSettle = r_settle_us(0);
         bool onHome = true;
+        int pageIndex = -9999;
+        bool folderOpen = false;
 
         // Skip work when not on the home screen.
         uint64_t ctrl = gl_icon_controller();
         if (r_is_objc_ptr(ctrl)) {
+            folderOpen = r_responds_main(ctrl, "hasOpenFolder") &&
+                         (r_msg2_main(ctrl, "hasOpenFolder", 0, 0, 0, 0) & 0xff);
+
             uint64_t mgr = gl_icon_manager(ctrl);
             uint64_t rootFC = gl_root_folder_controller(ctrl, mgr);
             uint64_t rootView = gl_safe_msg(rootFC, "rootFolderView", 0, 0, 0, 0);
             if (r_is_objc_ptr(rootView)) {
-                int idx = r_responds_main(rootView, "currentPageIndex")
+                pageIndex = r_responds_main(rootView, "currentPageIndex")
                     ? (int)r_msg2_main(rootView, "currentPageIndex", 0, 0, 0, 0)
                     : -1;
                 int cnt = r_responds_main(rootView, "iconListViewCount")
                     ? (int)r_msg2_main(rootView, "iconListViewCount", 0, 0, 0, 0)
                     : 0;
-                onHome = (idx > 100 && idx <= 100 + cnt);
+                onHome = (pageIndex > 100 && pageIndex <= 100 + cnt);
             }
         }
 
-        if (onHome && ++tick >= 4) {
+        // Get out of SpringBoard's way while it runs a transition of its own.
+        // The original Gravity tweak knew this by hooking
+        // _folderDidFinishOpenClose: and _scrollViewWillBeginDragging from
+        // inside SpringBoard; we live outside that process, so we poll the same
+        // two states instead. A poll tick of delay is far better than leaving
+        // the angle updates and the recovery pass fighting the folder and
+        // page-slide animations.
+        bool transition = onHome &&
+                          (folderOpen ||
+                           (lastPageIndex != -9999 && pageIndex != lastPageIndex));
+        if (transition && !parkedForTransition) {
+            parkedForTransition = true;
+            gl_set_all_groups_gravity_active(false);
+            printf("[GRAVITY] transition (folder=%d page=%d); physics parked\n",
+                   folderOpen ? 1 : 0, pageIndex);
+        } else if (!transition && parkedForTransition) {
+            parkedForTransition = false;
+            gl_set_all_groups_gravity_active(true);
+            printf("[GRAVITY] transition over; physics re-armed\n");
+        }
+        lastPageIndex = pageIndex;
+
+        if (onHome && !parkedForTransition && ++tick >= 4) {
             tick = 0;
             // No behavior-cache rebuild here. An empty cache always means the
             // poller was stopped too (gravitylite_forget_remote_state() does
