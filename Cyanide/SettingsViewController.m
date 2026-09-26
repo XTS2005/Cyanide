@@ -3955,48 +3955,9 @@ static void settings_restart_gravity_motion_if_active(const char *reason)
     NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
     if (![d boolForKey:kSettingsGravityLiteEnabled]) return;
     if (!settings_tweak_is_applied(kSettingsGravityLiteEnabled)) return;
-    if (settings_cleanup_in_progress()) return;
+    if (!g_springboard_rc_ready || settings_cleanup_in_progress()) return;
     if (!settings_screen_awake_cached() || settings_screen_locked_cached()) return;
     if (g_gravity_motion_stop_requested == 0 && g_gravity_motion_manager) return;
-
-    // Every other live tweak starts its loop and lets a per-tick gate wait for
-    // the SpringBoard session; gravity used to require g_springboard_rc_ready
-    // right here instead. The session is torn down for background and re-made
-    // lazily ("next kernel access re-makes the fds"), so a screen-awake or a
-    // return to the foreground regularly lands while it is still down -- and
-    // that check silently skipped the restart. Gravity then stayed dead for
-    // the rest of the boot: gravitylite_forget_remote_state() had stopped the
-    // recovery poller and dropped the behavior cache, while the icons kept
-    // falling in SpringBoard with nothing left to pull them back.
-    //
-    // So start the motion manager unconditionally and let
-    // settings_gravity_motion_can_remote_call() gate each individual sample.
-    // That sample is also what re-makes the channel -- the same lazy kernel
-    // access the rest of the app relies on.
-    if (!g_springboard_rc_ready) {
-        // Opening the channel can spend seconds in init_remote_call retries,
-        // and this runs from notify/foreground handlers on the main queue.
-        dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-            BOOL ready = NO;
-            @synchronized (settings_rc_lock()) {
-                ready = settings_ensure_springboard_remote_call_locked();
-            }
-            dispatch_async(dispatch_get_main_queue(), ^{
-                if (!ready) {
-                    printf("[GRAVITY] accelerometer restart deferred: SpringBoard "
-                           "channel unavailable%s%s\n",
-                           reason ? ": " : "", reason ?: "");
-                    return;
-                }
-                NSUserDefaults *dd = [NSUserDefaults standardUserDefaults];
-                GravityLiteConfig cfg = settings_gravitylite_config_from_defaults(dd);
-                settings_start_gravity_motion(cfg.magnitude, cfg.explosionForce);
-                printf("[GRAVITY] accelerometer loop restarted%s%s\n",
-                       reason ? ": " : "", reason ?: "");
-            });
-        });
-        return;
-    }
 
     GravityLiteConfig config = settings_gravitylite_config_from_defaults(d);
     settings_start_gravity_motion(config.magnitude, config.explosionForce);
@@ -5706,7 +5667,6 @@ void settings_application_will_enter_foreground(void)
     settings_sync_fastlockx_lite_for_screen_state_async("will enter foreground");
     settings_start_themer_live_loop();
     settings_resume_livewp_after_wake_async("will enter foreground");
-    settings_restart_gravity_motion_if_active("will enter foreground");
 }
 
 void settings_application_did_become_active(void)
@@ -5724,7 +5684,6 @@ void settings_application_did_become_active(void)
     settings_sync_fastlockx_lite_for_screen_state_async("became active");
     settings_start_themer_live_loop();
     settings_resume_livewp_after_wake_async("became active");
-    settings_restart_gravity_motion_if_active("became active");
 }
 
 static BOOL settings_key_is_sbc(NSString *key)
