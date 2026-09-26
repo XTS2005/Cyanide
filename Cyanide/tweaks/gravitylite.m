@@ -1455,15 +1455,64 @@ static int gl_detach_all_group_physics(void)
     return touched;
 }
 
+// Puts the group's icons back into every behavior: gravity, collision and item
+// behavior. gl_detach_group_physics() removed them from all three, so undoing
+// it has to be symmetric. Re-adding them to the gravity behavior alone leaves
+// the collision boundary and the damping with empty item lists -- the icons
+// then accelerate and leave the screen, which is exactly the
+// "recovered 15 out-of-bounds icon(s)" the field log showed one second after
+// coming back from the background.
+static void gl_attach_group_items(uint64_t group)
+{
+    uint64_t animator = gl_dict_get(group, s_key_animator);
+    uint64_t icons = gl_dict_get(group, s_key_icons);
+    if (!r_is_objc_ptr(animator) || !r_is_objc_ptr(icons)) return;
+
+    uint64_t behaviors = gl_safe_msg(animator, "behaviors", 0, 0, 0, 0);
+    uint64_t bn = gl_array_count(behaviors);
+    if (bn > 64) bn = 64;
+
+    uint64_t n = gl_array_count(icons);
+    if (n > 256) n = 256;
+
+    for (uint64_t j = 0; j < bn; j++) {
+        uint64_t behavior = gl_array_object(behaviors, j);
+        if (!r_is_objc_ptr(behavior)) continue;
+        if (!r_responds_main(behavior, "addItem:")) continue;
+        for (uint64_t k = 0; k < n; k++) {
+            uint64_t item = gl_array_object(icons, k);
+            if (!r_is_objc_ptr(item)) continue;
+            r_msg2_main(behavior, "addItem:", item, 0, 0, 0);
+        }
+    }
+}
+
 // Re-arms the physics after gl_detach_all_group_physics(). The behaviors are
-// still installed and only their item lists are empty, so this is the same
-// operation as a cache refresh: put the icons back into each behavior, re-set
-// the gravity angle/magnitude, and re-cache the behavior pointers.
+// still installed and only their item lists are empty, so this puts the icons
+// back into each of them and then re-arms/re-caches gravity.
 static int gl_reattach_all_group_physics(void)
 {
     if (!__atomic_load_n(&s_gravity_last_config_valid, __ATOMIC_SEQ_CST)) return 0;
+
+    uint64_t ctrl = gl_icon_controller();
+    uint64_t state = r_is_objc_ptr(ctrl) ? gl_get_state(ctrl) : 0;
+    if (!r_is_objc_ptr(state)) return 0;
+
+    uint64_t groups = gl_dict_get(state, s_key_groups);
+    uint64_t count = gl_array_count(groups);
+    if (count > 64) count = 64;
+
+    int rebuilt = 0;
+    for (uint64_t i = 0; i < count; i++) {
+        uint64_t group = gl_array_object(groups, i);
+        if (!r_is_objc_ptr(group)) continue;
+        gl_attach_group_items(group);
+        rebuilt++;
+    }
+
+    // Then re-arm gravity and re-cache the behavior pointers.
     gl_refresh_gravity_ptrs();
-    return __atomic_load_n(&s_gravity_ptr_count, __ATOMIC_RELAXED);
+    return rebuilt;
 }
 
 // Puts every icon back on its recorded grid frame and parks the gravity
