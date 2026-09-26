@@ -669,7 +669,6 @@ bool gravitylite_stop_in_session(void)
         uint64_t group = gl_array_object(groups, i);
         uint64_t animator  = gl_dict_get(group, s_key_animator);
         uint64_t icons     = gl_dict_get(group, s_key_icons);
-        uint64_t liveFrames = gl_dict_get(group, s_key_liveFrames);
         uint64_t listView  = gl_dict_get(group, s_key_listView);
 
         if (r_is_objc_ptr(animator)) {
@@ -677,23 +676,19 @@ bool gravitylite_stop_in_session(void)
         }
 
         uint64_t n = gl_array_count(icons);
-        uint64_t fn = gl_array_count(liveFrames);
-        if (n > fn) n = fn;
         if (n > 256) n = 256;
         for (uint64_t j = 0; j < n; j++) {
             uint64_t item = gl_array_object(icons, j);
-            GL_CGRect frame;
             if (!r_is_objc_ptr(item)) continue;
             gl_reset_transform(item);
-            if (gl_rect_from_value(gl_array_object(liveFrames, j), &frame) &&
-                gl_rect_valid(frame)) {
-                gl_set_rect(item, "setFrame:", frame);
-            }
             restoredIcons++;
         }
 
         if (r_is_objc_ptr(listView)) {
             gl_set_double(listView, "setAlpha:", 1.0);
+            // Same reasoning as gl_restore_group_to_grid(): let SBIconListView
+            // place the icons instead of writing each frame, so deactivating is
+            // a 0.2s settle rather than a teleport.
             gl_layout_list_view(listView);
             gl_safe_msg(listView, "setNeedsLayout", 0, 0, 0, 0);
             gl_safe_msg(listView, "layoutIfNeeded", 0, 0, 0, 0);
@@ -1219,18 +1214,18 @@ static void gl_recover_out_of_bounds_icons(void)
     for (uint64_t i = 0; i < count; i++) {
         uint64_t group = gl_array_object(groups, i);
         uint64_t icons = gl_dict_get(group, s_key_icons);
-        uint64_t liveFrames = gl_dict_get(group, s_key_liveFrames);
         uint64_t listView = gl_dict_get(group, s_key_listView);
-        if (!r_is_objc_ptr(icons) || !r_is_objc_ptr(liveFrames)) continue;
+        if (!r_is_objc_ptr(icons)) continue;
 
         GL_CGRect bounds;
         if (!gl_get_rect(listView, "bounds", &bounds) || !gl_rect_valid(bounds)) continue;
 
         uint64_t n = gl_array_count(icons);
-        uint64_t fn = gl_array_count(liveFrames);
-        if (n > fn) n = fn;
         if (n > 256) n = 256;
 
+        // Only *fully* off-screen icons count: partially visible ones are left
+        // alone so App Library / Today View transitions don't get yanked back.
+        int outOfBounds = 0;
         for (uint64_t j = 0; j < n; j++) {
             uint64_t icon = gl_array_object(icons, j);
             GL_CGRect frame;
@@ -1242,16 +1237,20 @@ static void gl_recover_out_of_bounds_icons(void)
                               frame.y + frame.h <= 0.0 ||
                               frame.x >= bounds.w ||
                               frame.y >= bounds.h);
-            if (!fully_out) continue;
-
-            GL_CGRect homeFrame;
-            if (!gl_rect_from_value(gl_array_object(liveFrames, j), &homeFrame)) continue;
-            if (!gl_rect_valid(homeFrame)) continue;
-
-            gl_reset_transform(icon);
-            gl_set_rect(icon, "setFrame:", homeFrame);
-            recovered++;
+            if (fully_out) outOfBounds++;
         }
+        if (outOfBounds == 0) continue;
+
+        // Hand placement back to SpringBoard rather than writing frames.
+        // SBIconListView lays the page out with its own 0.2s animation (this is
+        // exactly what the original Gravity tweak does in restoreFrameGravity),
+        // whereas setting frames here is the "icon teleports" the user sees.
+        for (uint64_t j = 0; j < n; j++) {
+            uint64_t icon = gl_array_object(icons, j);
+            if (r_is_objc_ptr(icon)) gl_reset_transform(icon);
+        }
+        if (r_is_objc_ptr(listView)) gl_layout_list_view(listView);
+        recovered += outOfBounds;
     }
 
     // (5) Log only when changed.
@@ -1388,32 +1387,42 @@ static void gravitylite_install_lock_observer(void)
 
 // ---------------------------------------------------- app state observers ---
 
-// Toggles the group's gravity behavior. Collision and item behaviors are left
-// alone: they do nothing once nothing is pulling the icons, and re-arming
-// gravity is exactly what gl_refresh_gravity_ptrs() already does on the way
-// back from the background.
-static void gl_set_group_gravity_active(uint64_t group, bool active)
+// Detaches every icon from the group's behaviors and drops the behaviors.
+//
+// setActive:NO is not enough here: the item behavior stays alive and the
+// animator keeps driving those items, so a layout pass right after would be
+// undone immediately and the icons would snap back to wherever physics left
+// them. The original Gravity tweak removes the items and all behaviors the same
+// way before it asks SBIconListView to lay itself out.
+static void gl_detach_group_physics(uint64_t group)
 {
     uint64_t animator = gl_dict_get(group, s_key_animator);
+    uint64_t icons = gl_dict_get(group, s_key_icons);
     if (!r_is_objc_ptr(animator)) return;
-
-    uint64_t gravityCls = r_class("UIGravityBehavior");
-    if (!r_is_objc_ptr(gravityCls)) return;
 
     uint64_t behaviors = gl_safe_msg(animator, "behaviors", 0, 0, 0, 0);
     uint64_t bn = gl_array_count(behaviors);
     if (bn > 64) bn = 64;
+
+    uint64_t n = r_is_objc_ptr(icons) ? gl_array_count(icons) : 0;
+    if (n > 256) n = 256;
+
     for (uint64_t j = 0; j < bn; j++) {
         uint64_t behavior = gl_array_object(behaviors, j);
         if (!r_is_objc_ptr(behavior)) continue;
-        if (!(r_msg2(behavior, "isKindOfClass:", gravityCls, 0, 0, 0) & 0xff)) continue;
-        gl_set_bool(behavior, "setActive:", active);
+        if (!r_responds_main(behavior, "removeItem:")) continue;
+        for (uint64_t k = 0; k < n; k++) {
+            uint64_t item = gl_array_object(icons, k);
+            if (!r_is_objc_ptr(item)) continue;
+            r_msg2_main(behavior, "removeItem:", item, 0, 0, 0);
+        }
     }
+    r_msg2_main(animator, "removeAllBehaviors", 0, 0, 0, 0);
 }
 
-// Pauses or re-arms the gravity of every installed group. Used by the recovery
-// poller while SpringBoard is running a transition of its own.
-static int gl_set_all_groups_gravity_active(bool active)
+// Detaches physics for every installed group. Used when Cyanide leaves the
+// foreground, and while SpringBoard runs a transition of its own.
+static int gl_detach_all_group_physics(void)
 {
     uint64_t ctrl = gl_icon_controller();
     uint64_t state = r_is_objc_ptr(ctrl) ? gl_get_state(ctrl) : 0;
@@ -1427,10 +1436,43 @@ static int gl_set_all_groups_gravity_active(bool active)
     for (uint64_t i = 0; i < count; i++) {
         uint64_t group = gl_array_object(groups, i);
         if (!r_is_objc_ptr(group)) continue;
-        gl_set_group_gravity_active(group, active);
+        gl_detach_group_physics(group);
         touched++;
     }
     return touched;
+}
+
+// Re-installs the behaviors after gl_detach_all_group_physics(). Only the
+// behaviors are rebuilt -- the icons are already wherever SpringBoard put them,
+// so there is nothing to restore. gl_refresh_gravity_ptrs() then re-caches the
+// new behavior pointers, because the old ones were dropped with
+// removeAllBehaviors and any angle update aimed at them would go nowhere.
+static int gl_reattach_all_group_physics(void)
+{
+    if (!__atomic_load_n(&s_gravity_last_config_valid, __ATOMIC_SEQ_CST)) return 0;
+
+    uint64_t ctrl = gl_icon_controller();
+    uint64_t state = r_is_objc_ptr(ctrl) ? gl_get_state(ctrl) : 0;
+    if (!r_is_objc_ptr(state)) return 0;
+
+    uint64_t groups = gl_dict_get(state, s_key_groups);
+    uint64_t count = gl_array_count(groups);
+    if (count > 64) count = 64;
+
+    GravityLiteConfig config = s_gravity_last_config;
+    int rebuilt = 0;
+    for (uint64_t i = 0; i < count; i++) {
+        uint64_t group = gl_array_object(groups, i);
+        if (!r_is_objc_ptr(group)) continue;
+        uint64_t animator = gl_dict_get(group, s_key_animator);
+        uint64_t icons = gl_dict_get(group, s_key_icons);
+        if (!r_is_objc_ptr(animator) || !r_is_objc_ptr(icons)) continue;
+        gl_attach_behaviors(animator, icons, config);
+        rebuilt++;
+    }
+
+    if (rebuilt > 0) gl_refresh_gravity_ptrs();
+    return rebuilt;
 }
 
 // Puts every icon back on its recorded grid frame and parks the gravity
@@ -1461,9 +1503,10 @@ static void gravitylite_park_physics_and_restore_icons(void)
     for (uint64_t i = 0; i < count; i++) {
         uint64_t group = gl_array_object(groups, i);
         if (!r_is_objc_ptr(group)) continue;
-        // Park first: laying the list view out while gravity is still active
-        // would just let it drag the icons off the grid again.
-        gl_set_group_gravity_active(group, false);
+        // Detach first: a layout pass with the behaviors still attached would
+        // be undone immediately, because the item behavior keeps driving those
+        // items even when gravity is only set inactive.
+        gl_detach_group_physics(group);
         restored += gl_restore_group_to_grid(group);
     }
     printf("[GRAVITY] backgrounded: physics parked, %d icon(s) back on the grid\n",
@@ -1842,13 +1885,13 @@ static void *gl_poller_thread_main(void *arg)
                            (lastPageIndex != -9999 && pageIndex != lastPageIndex));
         if (transition && !parkedForTransition) {
             parkedForTransition = true;
-            gl_set_all_groups_gravity_active(false);
-            printf("[GRAVITY] transition (folder=%d page=%d); physics parked\n",
+            gl_detach_all_group_physics();
+            printf("[GRAVITY] transition (folder=%d page=%d); physics detached\n",
                    folderOpen ? 1 : 0, pageIndex);
         } else if (!transition && parkedForTransition) {
             parkedForTransition = false;
-            gl_set_all_groups_gravity_active(true);
-            printf("[GRAVITY] transition over; physics re-armed\n");
+            gl_reattach_all_group_physics();
+            printf("[GRAVITY] transition over; physics re-attached\n");
         }
         lastPageIndex = pageIndex;
 
