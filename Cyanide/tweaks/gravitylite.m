@@ -1515,56 +1515,29 @@ static int gl_reattach_all_group_physics(void)
     return rebuilt;
 }
 
-// Puts every icon back on its recorded grid frame and parks the gravity
-// behaviors. Runs while Cyanide is leaving the foreground, so it signals both
-// worker loops first (cheap), does the RemoteCall work, and lets a background
-// queue do the joins -- the same shape as gravitylite_stop_in_session().
-static void gravitylite_park_physics_and_restore_icons(void)
-{
-    __atomic_store_n(&s_tilt_running, 0, __ATOMIC_SEQ_CST);
-    __atomic_store_n(&s_poller_running, 0, __ATOMIC_SEQ_CST);
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-        gl_tilt_stop();
-        gl_poller_stop();
-    });
-
-    uint64_t ctrl = gl_icon_controller();
-    uint64_t state = r_is_objc_ptr(ctrl) ? gl_get_state(ctrl) : 0;
-    if (!r_is_objc_ptr(state)) {
-        printf("[GRAVITY] backgrounded: no state to park\n");
-        return;
-    }
-
-    uint64_t groups = gl_dict_get(state, s_key_groups);
-    uint64_t count = gl_array_count(groups);
-    if (count > 64) count = 64;
-
-    int restored = 0;
-    for (uint64_t i = 0; i < count; i++) {
-        uint64_t group = gl_array_object(groups, i);
-        if (!r_is_objc_ptr(group)) continue;
-        // Detach first: a layout pass with the behaviors still attached would
-        // be undone immediately, because the item behavior keeps driving those
-        // items even when gravity is only set inactive.
-        gl_detach_group_physics(group);
-        restored += gl_restore_group_to_grid(group);
-    }
-    printf("[GRAVITY] backgrounded: physics parked, %d icon(s) back on the grid\n",
-           restored);
-}
-
-// Cyanide is leaving the foreground. SpringBoard keeps running the physics we
-// installed, and while we are away the home screen is exactly what the user is
-// looking at: the angle updates and the recovery poller's setFrame/setTransform
-// calls were fighting SpringBoard's own animations, which is what made icons
-// twitch and teleport during the App-close animation and the folder open/close
-// transitions. Park the physics and put the icons back on the grid instead; the
-// notify path re-arms everything when we come back. This is also what keeps a
-// force-quit from leaving icons falling with nobody left to catch them.
+// Cyanide is leaving the foreground.
+//
+// The physics deliberately keeps running. Leaving the App is how this tweak is
+// meant to be used -- the icons are supposed to keep falling while the user is
+// on the home screen -- and parking them here made everything hang motionless,
+// which reads as "the tweak stopped working".
+//
+// What actually fixed the twitching was not stopping the physics: it was doing
+// recovery through SBIconListView's own layout pass instead of writing frames
+// (see gl_recover_out_of_bounds_icons) and getting out of the way for folder and
+// page transitions (see gl_poller_thread_main). Both are in place, so this only
+// reports the change of state.
+//
+// NOTE: the tilt feed is an App-side thread. With "Keep app alive in background"
+// off, iOS suspends Cyanide within seconds, the angle stops updating and the
+// icons keep falling in whatever direction was set last until they leave the
+// screen -- the recovery poller pulls them back the next time Cyanide runs. With
+// keep-alive on, the feed keeps updating and the background behaves like the
+// foreground.
 static void gravitylite_app_did_enter_background(void)
 {
     if (!__atomic_load_n(&s_gravity_active, __ATOMIC_SEQ_CST)) return;
-    gravitylite_park_physics_and_restore_icons();
+    printf("[GRAVITY] backgrounded: physics stays live\n");
 }
 
 static void gravitylite_app_did_become_active(void)
