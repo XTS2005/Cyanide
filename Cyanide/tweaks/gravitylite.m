@@ -138,6 +138,9 @@ static void gl_recover_out_of_bounds_icons(void);
 static int  gl_restore_group_to_grid(uint64_t group);
 static uint64_t gl_current_root_list_view(uint64_t ctrl, uint64_t mgr);
 static uint64_t gl_current_root_list_view_ios26_legacy(uint64_t ctrl);
+static void gl_detach_group_physics(uint64_t group);
+static int  gl_detach_all_group_physics(void);
+static int  gl_reattach_all_group_physics(void);
 
 
 static uint64_t gl_safe_msg(uint64_t obj, const char *selName,
@@ -1334,6 +1337,11 @@ static void gravitylite_display_state_changed(int token)
         if (__atomic_load_n(&s_gravity_active, __ATOMIC_SEQ_CST) &&
             gravitylite_display_is_unlocked() &&
             gravitylite_display_is_awake()) {
+            // Re-arm first: after a background trip the park path has taken the
+            // icons out of the behaviors and the cache is empty, and then
+            // gl_tilt_start() would have nothing to drive. Idempotent when the
+            // physics was never parked.
+            gl_reattach_all_group_physics();
             gl_tilt_start(s_gravity_last_config.magnitude);
             gl_poller_start();
         }
@@ -1387,13 +1395,19 @@ static void gravitylite_install_lock_observer(void)
 
 // ---------------------------------------------------- app state observers ---
 
-// Detaches every icon from the group's behaviors and drops the behaviors.
+// Takes every icon out of the group's behaviors.
 //
 // setActive:NO is not enough here: the item behavior stays alive and the
 // animator keeps driving those items, so a layout pass right after would be
 // undone immediately and the icons would snap back to wherever physics left
-// them. The original Gravity tweak removes the items and all behaviors the same
-// way before it asks SBIconListView to lay itself out.
+// them. The original Gravity tweak removes the items the same way before it
+// asks SBIconListView to lay itself out.
+//
+// The behaviors themselves are deliberately kept -- this is a pause, not a
+// teardown, so coming back is only a matter of re-adding the items. An earlier
+// version dropped the behaviors too, which left the tilt feed with an empty
+// behavior cache after a background round trip (the log line "tilt target cache
+// refreshed (0 gravity behavior(s))") and the icons simply stopped responding.
 static void gl_detach_group_physics(uint64_t group)
 {
     uint64_t animator = gl_dict_get(group, s_key_animator);
@@ -1417,7 +1431,6 @@ static void gl_detach_group_physics(uint64_t group)
             r_msg2_main(behavior, "removeItem:", item, 0, 0, 0);
         }
     }
-    r_msg2_main(animator, "removeAllBehaviors", 0, 0, 0, 0);
 }
 
 // Detaches physics for every installed group. Used when Cyanide leaves the
@@ -1442,37 +1455,15 @@ static int gl_detach_all_group_physics(void)
     return touched;
 }
 
-// Re-installs the behaviors after gl_detach_all_group_physics(). Only the
-// behaviors are rebuilt -- the icons are already wherever SpringBoard put them,
-// so there is nothing to restore. gl_refresh_gravity_ptrs() then re-caches the
-// new behavior pointers, because the old ones were dropped with
-// removeAllBehaviors and any angle update aimed at them would go nowhere.
+// Re-arms the physics after gl_detach_all_group_physics(). The behaviors are
+// still installed and only their item lists are empty, so this is the same
+// operation as a cache refresh: put the icons back into each behavior, re-set
+// the gravity angle/magnitude, and re-cache the behavior pointers.
 static int gl_reattach_all_group_physics(void)
 {
     if (!__atomic_load_n(&s_gravity_last_config_valid, __ATOMIC_SEQ_CST)) return 0;
-
-    uint64_t ctrl = gl_icon_controller();
-    uint64_t state = r_is_objc_ptr(ctrl) ? gl_get_state(ctrl) : 0;
-    if (!r_is_objc_ptr(state)) return 0;
-
-    uint64_t groups = gl_dict_get(state, s_key_groups);
-    uint64_t count = gl_array_count(groups);
-    if (count > 64) count = 64;
-
-    GravityLiteConfig config = s_gravity_last_config;
-    int rebuilt = 0;
-    for (uint64_t i = 0; i < count; i++) {
-        uint64_t group = gl_array_object(groups, i);
-        if (!r_is_objc_ptr(group)) continue;
-        uint64_t animator = gl_dict_get(group, s_key_animator);
-        uint64_t icons = gl_dict_get(group, s_key_icons);
-        if (!r_is_objc_ptr(animator) || !r_is_objc_ptr(icons)) continue;
-        gl_attach_behaviors(animator, icons, config);
-        rebuilt++;
-    }
-
-    if (rebuilt > 0) gl_refresh_gravity_ptrs();
-    return rebuilt;
+    gl_refresh_gravity_ptrs();
+    return __atomic_load_n(&s_gravity_ptr_count, __ATOMIC_RELAXED);
 }
 
 // Puts every icon back on its recorded grid frame and parks the gravity
@@ -1532,8 +1523,12 @@ static void gravitylite_app_did_become_active(void)
     if (!__atomic_load_n(&s_gravity_active, __ATOMIC_SEQ_CST)) return;
     if (!gravitylite_display_is_unlocked() || !gravitylite_display_is_awake()) return;
 
-    // gl_tilt_start() re-runs gl_refresh_gravity_ptrs(), which flips the parked
-    // gravity behaviors back to active.
+    // The park path took the icons out of the behaviors, so re-arm them first:
+    // gl_reattach_all_group_physics() re-adds the items and re-caches the
+    // behavior pointers, and gl_tilt_start() then starts driving them. Skipping
+    // the re-arm is what produced "tilt target cache refreshed (0 gravity
+    // behavior(s))" and left the icons unresponsive after a background trip.
+    gl_reattach_all_group_physics();
     gl_tilt_start(s_gravity_last_config.magnitude);
     gl_poller_start();
 }
