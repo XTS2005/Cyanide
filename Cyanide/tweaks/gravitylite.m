@@ -69,6 +69,9 @@ static const double kGravityMinAngularResistance = 0.5;
 // with the old (undamped) settings had nine of eleven icons outside the list
 // view; 1800 pt/s leaves ~30 pt per frame at 60 fps.
 static const double kGravityMaxItemSpeed = 1800.0;   // pt/s
+// Where an icon that starts out of bounds (or exactly on the edge) is nudged to
+// before physics begins. The original tweak uses the same 10pt for this.
+static const double kGravityEdgeInset = 10.0;
 
 static GravityLiteConfig s_gravity_last_config;
 static volatile int s_gravity_last_config_valid = 0;
@@ -540,6 +543,47 @@ static uint64_t gl_current_root_list_view(uint64_t ctrl, uint64_t mgr)
 // reference and released exactly once at the end of the success path. The
 // group dictionary retains animator/icons/liveFrames internally, so we do
 // not keep our own references beyond this function.
+// Whether this icon view should take part in the physics.
+//
+// Walking the view hierarchy turns up things that are not ordinary app icons:
+// the ANPlaceHolderIcon entries SpringBoard uses to reserve grid slots for
+// widgets, and widget views themselves. Putting those into a UIDynamicAnimator
+// breaks their layout -- a widget is a live, self-laying-out view, not a tile
+// that can be thrown around -- and the tiles next to it end up looking wrong
+// afterwards.
+//
+// The original Gravity tweak only had to skip ANPlaceHolderIcon, because it
+// built its item list from the icon model (SBIconListView.icons) instead of the
+// view hierarchy the way we do. Filtering on the icon type is the equivalent
+// guard here. If neither type selector answers we keep the icon rather than
+// silently dropping every icon on the page.
+static bool gl_icon_view_is_physics_target(uint64_t iconView)
+{
+    uint64_t icon = gl_safe_msg(iconView, "icon", 0, 0, 0, 0);
+    if (!r_is_objc_ptr(icon)) return false;   // no model behind it: not a real icon
+
+    uint64_t placeholderCls = r_class("ANPlaceHolderIcon");
+    if (r_is_objc_ptr(placeholderCls) &&
+        (r_msg2(icon, "isKindOfClass:", placeholderCls, 0, 0, 0) & 0xff)) {
+        return false;
+    }
+
+    BOOL canClassify = r_responds_main(icon, "isApplicationIcon") ||
+                       r_responds_main(icon, "isFolderIcon");
+    if (!canClassify) return true;
+
+    if (r_responds_main(icon, "isApplicationIcon") &&
+        (r_msg2_main(icon, "isApplicationIcon", 0, 0, 0, 0) & 0xff)) {
+        return true;
+    }
+    if (r_responds_main(icon, "isFolderIcon") &&
+        (r_msg2_main(icon, "isFolderIcon", 0, 0, 0, 0) & 0xff)) {
+        return true;
+    }
+    // Widgets and other special icons stay out of the physics.
+    return false;
+}
+
 static bool gl_build_group(uint64_t groups,
                            uint64_t listView,
                            uint64_t iconViewCls,
@@ -570,13 +614,27 @@ static bool gl_build_group(uint64_t groups,
     for (int i = 0; i < iconCount; i++) {
         uint64_t icon = iconViews[i];
         if (!r_is_objc_ptr(icon) || gl_view_is_hidden(icon)) continue;
+        if (!gl_icon_view_is_physics_target(icon)) continue;
 
         GL_CGRect iconBounds;
         GL_CGRect homeFrame;
         if (!gl_get_rect(icon, "bounds", &iconBounds) || !gl_rect_valid(iconBounds)) continue;
         if (!gl_get_rect(icon, "frame", &homeFrame) || !gl_rect_valid(homeFrame)) continue;
 
+        // An icon that starts outside the list view (or sitting exactly on the
+        // edge) flies straight off the moment gravity starts, so nudge it back
+        // inside first -- the same fix-up the original tweak applies before it
+        // attaches its behaviors.
+        bool nudged = false;
+        if (gl_rect_valid(listBounds)) {
+            if (homeFrame.x < 0.0) { homeFrame.x = kGravityEdgeInset; nudged = true; }
+            if (homeFrame.y < 0.0) { homeFrame.y = kGravityEdgeInset; nudged = true; }
+            if (homeFrame.x >= listBounds.w) { homeFrame.x = kGravityEdgeInset; nudged = true; }
+            if (homeFrame.y >= listBounds.h) { homeFrame.y = kGravityEdgeInset; nudged = true; }
+        }
+
         gl_reset_transform(icon);
+        if (nudged) gl_set_rect(icon, "setFrame:", homeFrame);
         gl_array_add(icons, icon);
         gl_array_add(iconFrames, gl_value_with_rect(homeFrame));
         added++;
