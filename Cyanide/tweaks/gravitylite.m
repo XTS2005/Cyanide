@@ -16,7 +16,9 @@
 #import <string.h>
 #import <unistd.h>
 #import <dispatch/dispatch.h>
+#import <notify.h>
 #import <pthread.h>
+#import <CoreMotion/CoreMotion.h>
 
 typedef struct {
     double a;
@@ -44,15 +46,30 @@ static volatile int s_gravity_ptr_count = 0;
 static GravityLiteConfig s_gravity_last_config;
 static volatile int s_gravity_last_config_valid = 0;
 static volatile int s_gravity_active = 0;
+static int s_gravity_lockstate_token = NOTIFY_TOKEN_INVALID;
+static int s_gravity_blanked_token = NOTIFY_TOKEN_INVALID;
+static int s_gravity_apps_token = NOTIFY_TOKEN_INVALID;
 static bool gravitylite_finish_apply(GravityLiteConfig config);
+
+// Tilt feed: this file drives the gravity angle from its own CMMotionManager
+// and worker thread, and watches the lock/blank notify state so it can stop
+// and restart itself. That keeps Gravity Lite self-contained -- the app-side
+// motion helper in SettingsViewController is a second, independent feed, and
+// neither side needs to know about the other.
+static CMMotionManager *s_tilt_manager = nil;
+static volatile int s_tilt_running = 0;
+static volatile int s_tilt_exited = 0;
+static volatile double s_tilt_magnitude = 2.2;
+static pthread_t s_tilt_thread;
+static volatile int s_tilt_thread_valid = 0;
+// Serializes start/stop so a background join can never race pthread_create().
+static pthread_mutex_t s_tilt_lifecycle_mutex = PTHREAD_MUTEX_INITIALIZER;
+static void gl_tilt_start(double magnitude);
+static void gl_tilt_stop(void);
+static void gl_tilt_stop_locked(void);
 
 // Recovery poller: periodically pulls fully off-screen icons back to
 // their recorded grid frames. Runs on its own thread.
-//
-// Gravity-angle updates come from SettingsViewController's motion handler
-// (settings_start_gravity_motion), which also owns the lock/blank notify
-// observers, so this file no longer keeps a CMMotionManager, a tilt thread,
-// or its own display-state tokens.
 static volatile int s_poller_running = 0;
 static volatile int s_poller_exited = 0;
 static pthread_t s_poller_thread;
@@ -64,6 +81,9 @@ static void gl_poller_start(void);
 static void gl_poller_stop(void);
 static void gl_poller_stop_locked(void);
 static void *gl_poller_thread_main(void *arg);
+
+static volatile int s_gravity_orientation = 1;
+static int gl_remote_orientation(void);
 
 static pthread_mutex_t s_gravity_refresh_mutex = PTHREAD_MUTEX_INITIALIZER;
 static volatile int s_gravity_last_logged_count = -1;
@@ -180,6 +200,16 @@ static int gl_remote_ios_major(void)
     if (!r_read_nsstring(version, buf, sizeof(buf))) return 0;
     int major = atoi(buf);
     return major > 0 ? major : 0;
+}
+
+static int gl_remote_orientation(void)
+{
+    uint64_t ctrl = gl_icon_controller();
+    if (!r_is_objc_ptr(ctrl)) return __atomic_load_n(&s_gravity_orientation, __ATOMIC_RELAXED);
+    if (!r_responds_main(ctrl, "orientation")) return __atomic_load_n(&s_gravity_orientation, __ATOMIC_RELAXED);
+    int o = (int)r_msg2_main(ctrl, "orientation", 0, 0, 0, 0);
+    if (o < 1 || o > 4) return __atomic_load_n(&s_gravity_orientation, __ATOMIC_RELAXED);
+    return o;
 }
 
 static void gl_dict_set(uint64_t dict, uint64_t key, uint64_t value)
@@ -563,12 +593,14 @@ bool gravitylite_stop_in_session(void)
            __atomic_load_n(&s_gravity_active, __ATOMIC_RELAXED));
     __atomic_store_n(&s_gravity_active, 0, __ATOMIC_SEQ_CST);
 
-    // Stop the poller before restoring frames below. Clearing the flag is a
-    // cheap, non-blocking signal; the join is handed to a background queue
-    // because this path runs on the main thread when the user deactivates
-    // the tweak and gl_poller_stop() can wait up to ~1s.
+    // Stop both worker loops before restoring frames below. Clearing the flags
+    // is a cheap, non-blocking signal; the joins are handed to a background
+    // queue because this path runs on the main thread when the user
+    // deactivates the tweak, and each stop can wait up to ~1s.
+    __atomic_store_n(&s_tilt_running, 0, __ATOMIC_SEQ_CST);
     __atomic_store_n(&s_poller_running, 0, __ATOMIC_SEQ_CST);
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        gl_tilt_stop();
         gl_poller_stop();
     });
 
@@ -866,9 +898,9 @@ bool gravitylite_update_gravity_angle_in_session(double angle, double magnitude)
         return false;
     }
     // No settle override here. r_settle_us() is a process-global with no
-    // locking, and this function runs on the motion handler thread (~20 Hz)
-    // while the main thread may be setting settle for a tweak apply; a
-    // save/restore pair split across two threads would clobber each other.
+    // locking, and this function runs at ~8 Hz from the tilt thread while the
+    // main thread may be setting settle for a tweak apply; a save/restore
+    // pair split across two threads would clobber each other.
     for (int i = 0; i < count; i++) {
         uint64_t gb = s_gravity_ptrs[i];
         if (!r_is_objc_ptr(gb)) continue;
@@ -889,21 +921,50 @@ bool gravitylite_update_gravity_angle_in_session(double angle, double magnitude)
 // SpringBoard, and clearing those would make a later apply skip its cleanup.
 void gravitylite_forget_remote_state(void)
 {
-    printf("[GRAVITY] forgot remote state (poller=%d gravity_ptrs=%d active=%d)\n",
+    printf("[GRAVITY] forgot remote state (tilt=%d poller=%d gravity_ptrs=%d active=%d)\n",
+           __atomic_load_n(&s_tilt_running, __ATOMIC_RELAXED),
            __atomic_load_n(&s_poller_running, __ATOMIC_RELAXED),
            __atomic_load_n(&s_gravity_ptr_count, __ATOMIC_RELAXED),
            __atomic_load_n(&s_gravity_active, __ATOMIC_RELAXED));
 
-    // Stop the poller before dropping the cached pointers: it keeps sending
-    // RemoteCall messages to them, and r_is_objc_ptr() only checks the
-    // address range -- it cannot tell whether the object is still alive, so
-    // a stale pointer here means messaging a freed object inside SpringBoard.
+    // Stop both worker loops before dropping the cached pointers: they keep
+    // sending RemoteCall messages to them, and r_is_objc_ptr() only checks the
+    // address range -- it cannot tell whether the object is still alive, so a
+    // stale pointer here means messaging a freed object inside SpringBoard.
+    //
+    // Clearing each running flag first is also what lets the notify watchers
+    // bring the loops back on their own once the session is usable again; see
+    // gravitylite_display_state_changed().
+    gl_tilt_stop();
     gl_poller_stop();
 
     pthread_mutex_lock(&s_gravity_refresh_mutex);
     __atomic_store_n(&s_gravity_ptr_count, 0, __ATOMIC_SEQ_CST);
     memset(s_gravity_ptrs, 0, sizeof(s_gravity_ptrs));
     pthread_mutex_unlock(&s_gravity_refresh_mutex);
+}
+
+// ------------------------------------------------------------- lock watch ---
+
+// When a notify token is unavailable we report "not locked" / "awake" rather
+// than the conservative opposite: the token can legitimately be missing on
+// some builds, and reading that as "locked" would silently disable the whole
+// tilt feed -- which this file has no other way to recover from, since it
+// drives the motion source itself.
+static bool gravitylite_display_is_unlocked(void)
+{
+    if (s_gravity_lockstate_token == NOTIFY_TOKEN_INVALID) return true;
+    uint64_t locked = 0;
+    if (notify_get_state(s_gravity_lockstate_token, &locked) != NOTIFY_STATUS_OK) return true;
+    return locked == 0;
+}
+
+static bool gravitylite_display_is_awake(void)
+{
+    if (s_gravity_blanked_token == NOTIFY_TOKEN_INVALID) return true;
+    uint64_t blanked = 0;
+    if (notify_get_state(s_gravity_blanked_token, &blanked) != NOTIFY_STATUS_OK) return true;
+    return blanked == 0;
 }
 
 static bool gl_group_physics_alive(uint64_t group)
@@ -1133,24 +1194,104 @@ static int gravitylite_revalidate_physics(void)
     return rebuilt;
 }
 
+static void gravitylite_display_state_changed(int token)
+{
+    (void)token;
+    if (!__atomic_load_n(&s_gravity_active, __ATOMIC_SEQ_CST)) return;
+
+    bool unlocked = gravitylite_display_is_unlocked();
+    bool awake = gravitylite_display_is_awake();
+
+    static int last_unlocked = -1;
+    static int last_awake = -1;
+    if (unlocked != last_unlocked || awake != last_awake) {
+        printf("[GRAVITY] display_state_changed: active=%d unlocked=%d awake=%d\n",
+               __atomic_load_n(&s_gravity_active, __ATOMIC_RELAXED), unlocked, awake);
+        last_unlocked = unlocked;
+        last_awake = awake;
+    }
+
+    if (!unlocked || !awake) {
+        gl_tilt_stop();
+        gl_poller_stop();
+        return;
+    }
+
+    // Hop to the main queue: gl_tilt_start touches CMMotionManager and issues
+    // RemoteCall messages, both of which prefer the main thread.
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (__atomic_load_n(&s_gravity_active, __ATOMIC_SEQ_CST) &&
+            gravitylite_display_is_unlocked() &&
+            gravitylite_display_is_awake()) {
+            gl_tilt_start(s_gravity_last_config.magnitude);
+            gl_poller_start();
+        }
+    });
+}
+
+// Registers each observer independently. An earlier version skipped the whole
+// block only when all three tokens were already valid, so one failing notify
+// name made every later apply re-register the other two -- leaking a token and
+// stacking a duplicate callback per apply.
+static void gravitylite_install_lock_observer(void)
+{
+    dispatch_queue_t q = dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0);
+
+    if (s_gravity_lockstate_token == NOTIFY_TOKEN_INVALID) {
+        int status = notify_register_dispatch("com.apple.springboard.lockstate",
+                                              &s_gravity_lockstate_token,
+                                              q, ^(int token) {
+            gravitylite_display_state_changed(token);
+        });
+        if (status != NOTIFY_STATUS_OK) {
+            s_gravity_lockstate_token = NOTIFY_TOKEN_INVALID;
+            printf("[GRAVITY] lock state notify unavailable (status=%d)\n", status);
+        }
+    }
+
+    if (s_gravity_blanked_token == NOTIFY_TOKEN_INVALID) {
+        int status = notify_register_dispatch("com.apple.springboard.hasBlankedScreen",
+                                              &s_gravity_blanked_token,
+                                              q, ^(int token) {
+            gravitylite_display_state_changed(token);
+        });
+        if (status != NOTIFY_STATUS_OK) {
+            s_gravity_blanked_token = NOTIFY_TOKEN_INVALID;
+            printf("[GRAVITY] blanked-screen notify unavailable (status=%d)\n", status);
+        }
+    }
+
+    if (s_gravity_apps_token == NOTIFY_TOKEN_INVALID) {
+        int status = notify_register_dispatch("com.apple.springboard.applicationsDidChange",
+                                              &s_gravity_apps_token,
+                                              q, ^(int token) {
+            gravitylite_display_state_changed(token);
+        });
+        if (status != NOTIFY_STATUS_OK) {
+            s_gravity_apps_token = NOTIFY_TOKEN_INVALID;
+            printf("[GRAVITY] apps notify unavailable (status=%d)\n", status);
+        }
+    }
+}
+
 static bool gravitylite_finish_apply(GravityLiteConfig config)
 {
     s_gravity_last_config = config;
     __atomic_store_n(&s_gravity_last_config_valid, 1, __ATOMIC_SEQ_CST);
     __atomic_store_n(&s_gravity_active, 1, __ATOMIC_SEQ_CST);
     s_gravity_last_logged_count = -1;
+    s_gravity_orientation = gl_remote_orientation();
     // (3) Mark recover needed on apply.
     __atomic_store_n(&s_recover_needed, 1, __ATOMIC_SEQ_CST);
+    gravitylite_install_lock_observer();
 
-    // Tilt is driven by SettingsViewController's motion handler
-    // (settings_start_gravity_motion), which owns the lock/blank observers
-    // and gates on them itself. From here we only need to (a) fill the
-    // behavior cache the angle updates write through, and (b) start the
-    // recovery poller once SpringBoard has settled the new layout.
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
         if (!__atomic_load_n(&s_gravity_active, __ATOMIC_SEQ_CST)) return;
-        gl_refresh_gravity_ptrs();
+        if (!gravitylite_display_is_unlocked() || !gravitylite_display_is_awake()) {
+            return;
+        }
+        gl_tilt_start(s_gravity_last_config.magnitude);
         gl_poller_start();
     });
 
@@ -1225,6 +1366,158 @@ static void gl_refresh_gravity_ptrs(void)
     }
 }
 
+// --------------------------------------------------------------- tilt source ---
+
+static void gl_tilt_apply_sample(double gx, double gy, bool fromDeviceMotion)
+{
+    double tilt = hypot(gx, gy);
+
+    int o = __atomic_load_n(&s_gravity_orientation, __ATOMIC_RELAXED);
+    double angle;
+    switch (o) {
+        case 2:  angle = atan2(gy, -gx); break;
+        case 3:  angle = atan2(-gx, -gy); break;
+        case 4:  angle = atan2(gx, gy); break;
+        case 1:
+        default: angle = atan2(-gy, gx); break;
+    }
+    if (tilt < 0.14) angle = M_PI_2;
+
+    double span = fmin(tilt, fromDeviceMotion ? 1.0 : 1.2);
+    double scale = fromDeviceMotion ? 0.60 : 0.50;
+    double magnitude = s_tilt_magnitude * ((tilt < 0.14) ? 0.65 : (0.90 + span * scale));
+    gravitylite_update_gravity_angle_in_session(angle, magnitude);
+
+    // (3) Mark recover needed on each tilt sample.
+    __atomic_store_n(&s_recover_needed, 1, __ATOMIC_SEQ_CST);
+}
+
+// (2) Tilt thread with idle backoff.
+static void *gl_tilt_thread_main(void *arg)
+{
+    (void)arg;
+    while (__atomic_load_n(&s_tilt_running, __ATOMIC_RELAXED)) {
+        // Nothing to drive: back off to 2 Hz to save power.
+        int count = __atomic_load_n(&s_gravity_ptr_count, __ATOMIC_RELAXED);
+        if (count == 0) {
+            usleep(500000);
+            continue;
+        }
+
+        CMMotionManager *mm = s_tilt_manager;
+        if (mm) {
+            if (mm.deviceMotionAvailable) {
+                CMDeviceMotion *motion = mm.deviceMotion;
+                if (motion) gl_tilt_apply_sample(motion.gravity.x, motion.gravity.y, true);
+            } else {
+                CMAccelerometerData *data = mm.accelerometerData;
+                if (data) gl_tilt_apply_sample(data.acceleration.x, data.acceleration.y, false);
+            }
+        }
+        usleep(120000);
+    }
+    __atomic_store_n(&s_tilt_exited, 1, __ATOMIC_SEQ_CST);
+    return NULL;
+}
+
+// Joins/detaches the current tilt thread and tears down its CMMotionManager.
+// Caller must hold s_tilt_lifecycle_mutex.
+static void gl_tilt_stop_locked(void)
+{
+    bool was_running = __atomic_load_n(&s_tilt_running, __ATOMIC_RELAXED) != 0;
+    if (was_running) {
+        __atomic_store_n(&s_tilt_exited, 0, __ATOMIC_SEQ_CST);
+        __atomic_store_n(&s_tilt_running, 0, __ATOMIC_SEQ_CST);
+    }
+
+    // The flag may already be clear: gravitylite_stop_in_session() clears it
+    // first so the thread starts exiting without blocking the main thread, and
+    // the join it schedules later lands here. The handle still needs retiring.
+    if (!was_running && !s_tilt_thread_valid) return;
+
+    for (int i = 0; i < 100; i++) {
+        if (__atomic_load_n(&s_tilt_exited, __ATOMIC_RELAXED)) break;
+        usleep(10000);
+    }
+    if (s_tilt_thread_valid) {
+        // Don't join ourselves.
+        if (pthread_self() != s_tilt_thread) {
+            if (__atomic_load_n(&s_tilt_exited, __ATOMIC_RELAXED)) {
+                pthread_join(s_tilt_thread, NULL);
+            } else {
+                printf("[GRAVITY] tilt thread did not exit in time; detaching\n");
+                pthread_detach(s_tilt_thread);
+            }
+        }
+        s_tilt_thread_valid = 0;
+    }
+
+    CMMotionManager *mm = s_tilt_manager;
+    s_tilt_manager = nil;
+    if (mm) {
+        [mm stopDeviceMotionUpdates];
+        [mm stopAccelerometerUpdates];
+    }
+}
+
+static void gl_tilt_stop(void)
+{
+    pthread_mutex_lock(&s_tilt_lifecycle_mutex);
+    gl_tilt_stop_locked();
+    pthread_mutex_unlock(&s_tilt_lifecycle_mutex);
+}
+
+static void gl_tilt_start(double magnitude)
+{
+    pthread_mutex_lock(&s_tilt_lifecycle_mutex);
+
+    if (__atomic_load_n(&s_tilt_running, __ATOMIC_RELAXED) &&
+        fabs(s_tilt_magnitude - magnitude) < 0.01) {
+        if (__atomic_load_n(&s_gravity_ptr_count, __ATOMIC_RELAXED) == 0) {
+            gl_refresh_gravity_ptrs();
+        }
+        pthread_mutex_unlock(&s_tilt_lifecycle_mutex);
+        return;
+    }
+
+    // Retire a thread whose stop is still joining on a background queue,
+    // otherwise pthread_create() below would overwrite a live handle.
+    gl_tilt_stop_locked();
+    if (!(magnitude > 0.0)) magnitude = 2.0;
+    s_tilt_magnitude = magnitude;
+    gl_refresh_gravity_ptrs();
+
+    CMMotionManager *mm = [[CMMotionManager alloc] init];
+    if (!mm) {
+        pthread_mutex_unlock(&s_tilt_lifecycle_mutex);
+        return;
+    }
+    s_tilt_manager = mm;
+    if (mm.deviceMotionAvailable) {
+        mm.deviceMotionUpdateInterval = 0.05;
+        [mm startDeviceMotionUpdates];
+    } else {
+        mm.accelerometerUpdateInterval = 0.05;
+        [mm startAccelerometerUpdates];
+    }
+
+    __atomic_store_n(&s_tilt_exited, 0, __ATOMIC_SEQ_CST);
+    __atomic_store_n(&s_tilt_running, 1, __ATOMIC_SEQ_CST);
+    if (pthread_create(&s_tilt_thread, NULL, gl_tilt_thread_main, NULL) != 0) {
+        __atomic_store_n(&s_tilt_running, 0, __ATOMIC_SEQ_CST);
+        [mm stopDeviceMotionUpdates];
+        [mm stopAccelerometerUpdates];
+        s_tilt_manager = nil;
+        s_tilt_thread_valid = 0;
+        pthread_mutex_unlock(&s_tilt_lifecycle_mutex);
+        printf("[GRAVITY] tilt feed could not start\n");
+        return;
+    }
+    s_tilt_thread_valid = 1;
+    pthread_mutex_unlock(&s_tilt_lifecycle_mutex);
+    printf("[GRAVITY] tilt feed running (own source, magnitude=%.1fx)\n", magnitude);
+}
+
 // ------------------------------------------------------------- home poller ---
 
 // (1) Poller only runs when home screen is visible.
@@ -1263,12 +1556,12 @@ static void *gl_poller_thread_main(void *arg)
 
         if (onHome && ++tick >= 4) {
             tick = 0;
-            // Self-heal the behavior cache: it is zeroed by
-            // gravitylite_forget_remote_state() and can also be lost when
-            // SpringBoard rebuilds its animators.
-            if (__atomic_load_n(&s_gravity_ptr_count, __ATOMIC_RELAXED) == 0) {
-                gl_refresh_gravity_ptrs();
-            }
+            // No behavior-cache rebuild here. An empty cache always means the
+            // poller was stopped too (gravitylite_forget_remote_state() does
+            // both, in that order), so the state is unreachable -- and
+            // walking SpringBoard's animator/behavior graph from this thread
+            // would race its layout. gravitylite_update_gravity_angle_in_session()
+            // owns that rebuild instead, under the RemoteCall lock.
             if (__atomic_load_n(&s_recover_needed, __ATOMIC_RELAXED)) {
                 gl_recover_out_of_bounds_icons();
             }
