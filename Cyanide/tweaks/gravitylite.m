@@ -836,7 +836,27 @@ bool gravitylite_explosion_in_session(double force)
 bool gravitylite_update_gravity_angle_in_session(double angle, double magnitude)
 {
     if (__atomic_load_n(&s_gravity_ptr_count, __ATOMIC_RELAXED) == 0) {
-        return false;
+        // The behavior cache is empty. Either this is the first update after
+        // an apply (finish_apply fills it ~0.5s in) or a RemoteCall session
+        // teardown dropped it (gravitylite_forget_remote_state). Rebuild it
+        // here so the tilt feed heals itself, and bring the recovery poller
+        // back at the same time: it has no other restart entry point once
+        // forget_remote_state has stopped it, which left the icons falling
+        // with nothing to pull them back to the grid.
+        //
+        // Rate-limited: this runs at ~20 Hz, and while the session is still
+        // down a rebuild attempt blocks on its RemoteCall timeouts, so we try
+        // at most once per ~second. The attempt itself is a kernel access,
+        // which is what makes SpringBoard re-make the session fds.
+        if (!__atomic_load_n(&s_gravity_active, __ATOMIC_RELAXED)) return false;
+
+        static volatile int rebuild_tick = 0;
+        if (__atomic_add_fetch(&rebuild_tick, 1, __ATOMIC_RELAXED) < 20) return false;
+        __atomic_store_n(&rebuild_tick, 0, __ATOMIC_RELAXED);
+
+        gl_refresh_gravity_ptrs();
+        if (__atomic_load_n(&s_gravity_ptr_count, __ATOMIC_RELAXED) == 0) return false;
+        gl_poller_start();
     }
 
     pthread_mutex_lock(&s_gravity_refresh_mutex);
